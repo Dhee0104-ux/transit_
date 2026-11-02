@@ -1,0 +1,83 @@
+package org.opentripplanner.ext.flex.trip;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.opentripplanner.core.model.id.FeedScopedIdForTestFactory.id;
+import static org.opentripplanner.model.FlexStopTimesFactory.area;
+import static org.opentripplanner.model.FlexStopTimesFactory.areaWithContinuousStopping;
+import static org.opentripplanner.model.FlexStopTimesFactory.regularStop;
+import static org.opentripplanner.model.FlexStopTimesFactory.regularStopWithContinuousStopping;
+
+import java.util.List;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.opentripplanner.model.StopTime;
+
+class ScheduledDeviatedTripTest {
+
+  @Test
+  void testMaxSpanDays() {
+    var stopTimes = List.of(area("10:10", "10:15"), regularStop("10:40", "10:45"));
+    var trip = ScheduledDeviatedTrip.of(id("1")).withStopTimes(stopTimes).build();
+
+    assertEquals(0, trip.maxSpanDays());
+  }
+
+  @Test
+  void testMaxSpanDaysOvernight() {
+    var stopTimes = List.of(area("10:10", "10:15"), regularStop("26:00", "26:00"));
+    var trip = ScheduledDeviatedTrip.of(id("1")).withStopTimes(stopTimes).build();
+    assertEquals(1, trip.maxSpanDays());
+  }
+
+  @Test
+  void testMaxSpanDaysNextDay() {
+    var stopTimes = List.of(area("24:00", "24:00"), regularStop("26:00", "26:00"));
+    var trip = ScheduledDeviatedTrip.of(id("1")).withStopTimes(stopTimes).build();
+    assertEquals(1, trip.maxSpanDays());
+  }
+
+  private static List<List<StopTime>> isScheduledDeviatedTripCases() {
+    return List.of(
+      List.of(
+        regularStop("10:10"),
+        area("10:20", "10:30"),
+        regularStop("10:40"),
+        area("10:50", "11:00")
+      ),
+      List.of(
+        regularStopWithContinuousStopping("10:10"),
+        area("10:20", "10:30"),
+        regularStopWithContinuousStopping("10:40"),
+        area("10:50", "11:00")
+      )
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource("isScheduledDeviatedTripCases")
+  void isScheduledDeviatedTrip(List<StopTime> stopTimes) {
+    assertTrue(ScheduledDeviatedTrip.isScheduledDeviatedFlexTrip(stopTimes));
+  }
+
+  private static List<List<StopTime>> isNotScheduledDeviatedTripCases() {
+    return List.of(
+      List.of(
+        areaWithContinuousStopping("10:10"),
+        regularStop("10:20", "10:30"),
+        areaWithContinuousStopping("10:40"),
+        regularStop("10:50", "11:00")
+      ),
+      List.of(regularStop("10:10"), regularStop("10:20")),
+      List.of(area("10:00", "18:00"))
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource("isNotScheduledDeviatedTripCases")
+  void isNotScheduledDeviatedTrip(List<StopTime> stopTimes) {
+    assertFalse(ScheduledDeviatedTrip.isScheduledDeviatedFlexTrip(stopTimes));
+  }
+}

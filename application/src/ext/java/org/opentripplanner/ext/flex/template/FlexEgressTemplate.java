@@ -1,0 +1,98 @@
+package org.opentripplanner.ext.flex.template;
+
+import java.util.Collection;
+import java.util.List;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.ext.flex.FlexParameters;
+import org.opentripplanner.ext.flex.FlexPathDurations;
+import org.opentripplanner.ext.flex.edgetype.FlexTripEdge;
+import org.opentripplanner.ext.flex.flexpathcalculator.FlexPathCalculator;
+import org.opentripplanner.ext.flex.trip.FlexTrip;
+import org.opentripplanner.place.api.NearbyStop;
+import org.opentripplanner.street.model.edge.Edge;
+import org.opentripplanner.street.model.vertex.Vertex;
+import org.opentripplanner.street.search.state.State;
+import org.opentripplanner.transfer.regular.model.PathTransfer;
+import org.opentripplanner.transit.model.site.RegularStop;
+import org.opentripplanner.transit.model.site.StopLocation;
+
+class FlexEgressTemplate extends AbstractFlexTemplate {
+
+  FlexEgressTemplate(
+    FlexTrip<?, ?> trip,
+    StopLocation boardStop,
+    int boardStopPosition,
+    NearbyStop alightStop,
+    int alightStopPosition,
+    FlexServiceDate date,
+    FlexPathCalculator calculator,
+    FlexParameters flexParameters
+  ) {
+    super(
+      trip,
+      alightStop,
+      boardStop,
+      boardStopPosition,
+      alightStopPosition,
+      date,
+      calculator,
+      flexParameters
+    );
+  }
+
+  protected List<Edge> getTransferEdges(PathTransfer transfer) {
+    return transfer.getEdges().reversed();
+  }
+
+  protected RegularStop getFinalStop(PathTransfer transfer) {
+    return transfer.from instanceof RegularStop regularStop ? regularStop : null;
+  }
+
+  protected Collection<PathTransfer> getTransfersFromTransferStop(
+    FlexAccessEgressCallbackAdapter callback
+  ) {
+    return callback.getTransfersToStop(transferStop);
+  }
+
+  protected Vertex getFlexVertex(Edge edge) {
+    return edge.getToVertex();
+  }
+
+  protected FlexPathDurations calculateFlexPathDurations(FlexTripEdge flexEdge, State state) {
+    int postFlexTime = (int) accessEgress.state.getElapsedTimeSeconds();
+    int edgeTimeInSeconds = flexEdge.getTimeInSeconds();
+    int preFlexTime = (int) state.getElapsedTimeSeconds() - postFlexTime - edgeTimeInSeconds;
+    return new FlexPathDurations(
+      preFlexTime,
+      edgeTimeInSeconds,
+      postFlexTime,
+      secondsFromStartOfTime
+    );
+  }
+
+  protected FlexTripEdge getFlexEdge(Vertex flexFromVertex, FeedScopedId transferStopId) {
+    var flexPath = calculator.calculateFlexPath(
+      flexFromVertex,
+      accessEgress.state.getVertex(),
+      boardStopPosition,
+      alightStopPosition
+    );
+
+    if (flexPath == null) {
+      return null;
+    }
+
+    return new FlexTripEdge(
+      flexFromVertex,
+      accessEgress.state.getVertex(),
+      transferStopId,
+      accessEgress.stopId,
+      trip,
+      boardStopPosition,
+      alightStopPosition,
+      serviceDate,
+      flexPath,
+      flexParameters
+    );
+  }
+}

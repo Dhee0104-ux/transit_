@@ -1,0 +1,13 @@
+{
+  feeds {
+    agencies {
+      name
+      url
+    }
+    publisher {
+      name
+      url
+    }
+    version
+  }
+}

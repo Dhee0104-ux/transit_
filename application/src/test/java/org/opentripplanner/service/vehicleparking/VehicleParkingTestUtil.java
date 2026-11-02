@@ -1,0 +1,39 @@
+package org.opentripplanner.service.vehicleparking;
+
+import org.opentripplanner.core.model.i18n.NonLocalizedString;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.service.vehicleparking.model.VehicleParking;
+import org.opentripplanner.service.vehicleparking.model.VehicleParkingSpaces;
+import org.opentripplanner.street.geometry.WgsCoordinate;
+import org.opentripplanner.street.model.StreetModelForTest;
+
+public class VehicleParkingTestUtil {
+
+  private static final String TEST_FEED_ID = "TEST";
+
+  public static VehicleParking createParkingWithEntrances(String id, double x, double y) {
+    return createParkingWithEntrances(id, x, y, null);
+  }
+
+  public static VehicleParking createParkingWithEntrances(
+    String id,
+    double x,
+    double y,
+    VehicleParkingSpaces vehiclePlaces
+  ) {
+    VehicleParking.VehicleParkingEntranceCreator entrance = builder ->
+      builder
+        .entranceId(new FeedScopedId(TEST_FEED_ID, "Entrance " + id))
+        .name(new NonLocalizedString("Entrance " + id))
+        .coordinate(new WgsCoordinate(y, x))
+        .walkAccessible(true);
+
+    return StreetModelForTest.vehicleParking()
+      .id(new FeedScopedId(TEST_FEED_ID, id))
+      .bicyclePlaces(true)
+      .capacity(vehiclePlaces)
+      .availability(vehiclePlaces)
+      .entrance(entrance)
+      .build();
+  }
+}

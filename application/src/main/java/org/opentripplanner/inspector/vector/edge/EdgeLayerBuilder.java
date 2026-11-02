@@ -1,0 +1,48 @@
+package org.opentripplanner.inspector.vector.edge;
+
+import java.util.List;
+import org.locationtech.jts.geom.Envelope;
+import org.locationtech.jts.geom.Geometry;
+import org.opentripplanner.inspector.vector.LayerBuilder;
+import org.opentripplanner.inspector.vector.LayerParameters;
+import org.opentripplanner.service.streetdetails.StreetDetailsService;
+import org.opentripplanner.street.graph.Graph;
+import org.opentripplanner.street.model.edge.Edge;
+
+/**
+ * Selects all edges to be displayed for debugging.
+ */
+public class EdgeLayerBuilder extends LayerBuilder<Edge> {
+
+  private final Graph graph;
+
+  public EdgeLayerBuilder(
+    Graph graph,
+    LayerParameters layerParameters,
+    StreetDetailsService streetDetailsService
+  ) {
+    super(
+      new EdgePropertyMapper(streetDetailsService),
+      layerParameters.name(),
+      layerParameters.expansionFactor()
+    );
+    this.graph = graph;
+  }
+
+  @Override
+  protected List<Geometry> findGeometries(Envelope query) {
+    return graph
+      .findEdges(query)
+      .stream()
+      .map(e -> new DebugEdge(e, EdgeGeometryMapper.map(e)))
+      .filter(e -> e.geometry != null)
+      .map(debugEdge -> {
+        Geometry geometry = debugEdge.geometry.copy();
+        geometry.setUserData(debugEdge.edge);
+        return geometry;
+      })
+      .toList();
+  }
+
+  private record DebugEdge(Edge edge, Geometry geometry) {}
+}

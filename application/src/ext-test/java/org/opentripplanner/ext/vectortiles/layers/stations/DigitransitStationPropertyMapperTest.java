@@ -1,0 +1,47 @@
+package org.opentripplanner.ext.vectortiles.layers.stations;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.opentripplanner.core.model.id.FeedScopedIdForTestFactory.id;
+
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.core.model.i18n.I18NString;
+import org.opentripplanner.ext.vectortiles.layers.TestTransitService;
+import org.opentripplanner.transit.model._data.TransitRepositoryForTest;
+import org.opentripplanner.transit.model.site.Station;
+import org.opentripplanner.transit.service.SiteRepository;
+import org.opentripplanner.transit.service.TransitRepository;
+
+public class DigitransitStationPropertyMapperTest {
+
+  private static final String CODE = "ABC";
+
+  @Test
+  void map() {
+    var transitRepository = new TransitRepository(new SiteRepository());
+    transitRepository.index();
+    var transitService = new TestTransitService(transitRepository);
+
+    var mapper = DigitransitStationPropertyMapper.create(transitService, Locale.US);
+
+    var station = Station.of(id("a-station"))
+      .withCoordinate(1, 1)
+      .withCode(CODE)
+      .withName(I18NString.of("A station"))
+      .build();
+
+    TransitRepositoryForTest.of().stop("stop-1").withParentStation(station).build();
+
+    Map<String, Object> map = new HashMap<>();
+    mapper.map(station).forEach(o -> map.put(o.key(), o.value()));
+
+    assertEquals("F:a-station", map.get("gtfsId"));
+    assertEquals("A station", map.get("name"));
+    assertEquals(CODE, map.get("code"));
+    assertEquals("", map.get("type"));
+    assertEquals("[{\"mode\":\"RAIL\",\"gtfsType\":100,\"shortName\":\"R1\"}]", map.get("routes"));
+    assertEquals("[\"F:stop-1\"]", map.get("stops"));
+  }
+}

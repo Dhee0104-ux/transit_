@@ -1,0 +1,122 @@
+package org.opentripplanner.gtfs.graphbuilder;
+
+import static graphql.Assert.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import java.util.List;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.opentripplanner.ConstantsForTests;
+import org.opentripplanner.core.model.time.LocalDateRange;
+import org.opentripplanner.street.graph.Graph;
+import org.opentripplanner.test.support.ResourceLoader;
+import org.opentripplanner.transit.service.SiteRepository;
+import org.opentripplanner.transit.service.TransitRepository;
+
+class GtfsModuleTest {
+
+  @Test
+  void addShapesForFrequencyTrips() {
+    var model = buildTestModel();
+
+    var bundle = GtfsBundleTestFactory.forTest(ConstantsForTests.SIMPLE_GTFS);
+    var module = GtfsModuleTestFactory.forTest(
+      List.of(bundle),
+      model.transitRepository,
+      model.graph,
+      LocalDateRange.ofUnbounded()
+    );
+
+    module.buildGraph();
+
+    var frequencyTripPattern = model.transitRepository
+      .getAllTripPatterns()
+      .stream()
+      .filter(p -> !p.getScheduledTimetable().getFrequencyEntries().isEmpty())
+      .toList();
+
+    assertEquals(1, frequencyTripPattern.size());
+
+    var tripPattern = frequencyTripPattern.getFirst();
+    assertNotNull(tripPattern.getGeometry());
+    assertNotNull(tripPattern.getHopGeometry(0));
+
+    var pattern = model.transitRepository.getTripPatternForId(tripPattern.getId());
+    assertNotNull(pattern.getGeometry());
+    assertNotNull(pattern.getHopGeometry(0));
+  }
+
+  @Test
+  void duplicateFeedId() {
+    var bundles = List.of(bundle("A"), bundle("A"));
+    var model = buildTestModel();
+
+    var module = GtfsModuleTestFactory.forTest(
+      bundles,
+      model.transitRepository,
+      model.graph,
+      LocalDateRange.ofUnbounded()
+    );
+    assertThrows(IllegalArgumentException.class, module::buildGraph);
+  }
+
+  private static TestModels buildTestModel() {
+    var siteRepository = new SiteRepository();
+    var graph = new Graph();
+    var transitRepository = new TransitRepository(siteRepository);
+    return new TestModels(graph, transitRepository);
+  }
+
+  record TestModels(Graph graph, TransitRepository transitRepository) {}
+
+  static GtfsBundle bundle(String feedId) {
+    return GtfsBundleTestFactory.forTest(
+      ResourceLoader.of(GtfsModuleTest.class).file("/gtfs/interlining"),
+      feedId
+    );
+  }
+
+  @Nested
+  class Interlining {
+
+    static List<Arguments> interliningCases() {
+      return List.of(
+        Arguments.of(List.of(bundle("A")), 2),
+        Arguments.of(List.of(bundle("A"), bundle("B")), 4),
+        Arguments.of(List.of(bundle("A"), bundle("B"), bundle("C")), 6)
+      );
+    }
+
+    /**
+     * We test that the number of stay-seated transfers grows linearly (not exponentially) with the
+     * number of GTFS input feeds.
+     */
+    @ParameterizedTest(name = "Bundles {0} should generate {1} stay-seated transfers")
+    @MethodSource("interliningCases")
+    void interline(List<GtfsBundle> bundles, int expectedTransfers) {
+      var model = buildTestModel();
+
+      var feedIds = bundles.stream().map(GtfsBundle::getFeedId).collect(Collectors.toSet());
+      assertEquals(bundles.size(), feedIds.size());
+
+      var module = GtfsModuleTestFactory.forTest(
+        bundles,
+        model.transitRepository,
+        model.graph,
+        LocalDateRange.ofUnbounded()
+      );
+
+      module.buildGraph();
+
+      assertEquals(
+        expectedTransfers,
+        model.transitRepository.getConstrainedTransferService().listAll().size()
+      );
+    }
+  }
+}

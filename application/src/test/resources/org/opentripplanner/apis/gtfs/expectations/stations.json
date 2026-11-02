@@ -1,0 +1,22 @@
+{
+  "data": {
+    "stations": [
+      {
+        "gtfsId": "F:Omega",
+        "lat": 60.0,
+        "lon": 10.0,
+        "name": "Omega",
+        "vehicleMode": null,
+        "allRoutes": null,
+        "routesWithinRange": null,
+        "alerts": [
+          {
+            "alertHeaderText": "Station closed",
+            "alertDescriptionText": "This station is currently closed"
+          }
+        ],
+        "patternAndRouteAlerts": []
+      }
+    ]
+  }
+}

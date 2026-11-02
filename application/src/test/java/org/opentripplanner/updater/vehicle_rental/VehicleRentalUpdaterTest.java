@@ -1,0 +1,159 @@
+package org.opentripplanner.updater.vehicle_rental;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.framework.io.HttpHeaders;
+import org.opentripplanner.service.vehiclerental.internal.DefaultVehicleRentalRepository;
+import org.opentripplanner.service.vehiclerental.model.VehicleRentalPlace;
+import org.opentripplanner.updater.GraphUpdaterManager;
+import org.opentripplanner.updater.spi.UpdaterConstructionException;
+import org.opentripplanner.updater.spi.WriteDomain;
+import org.opentripplanner.updater.spi.WriteToGraphCallback;
+import org.opentripplanner.updater.spi.WriteToGraphCallbacks;
+import org.opentripplanner.updater.vehicle_rental.datasources.VehicleRentalDataSource;
+import org.opentripplanner.updater.vehicle_rental.datasources.params.RentalPickupType;
+import org.opentripplanner.updater.vehicle_rental.datasources.params.VehicleRentalDataSourceParameters;
+import org.opentripplanner.utils.lang.RunnableUtils;
+
+class VehicleRentalUpdaterTest {
+
+  public static final VehicleRentalUpdaterParameters PARAMS = new VehicleRentalUpdaterParameters(
+    "A",
+    Duration.ofMinutes(1),
+    Duration.ZERO,
+    new FakeParams()
+  );
+  public static final DefaultVehicleRentalRepository REPOSITORY =
+    new DefaultVehicleRentalRepository();
+
+  @Test
+  void failingDataSourceCountsAsPrimed() {
+    var source = new FailingDataSource();
+    var updater = new VehicleRentalUpdater(PARAMS, source, null, REPOSITORY);
+
+    assertFalse(updater.isPrimed());
+    var manager = new MockManager(updater);
+    manager.startUpdaters();
+    assertTrue(source.hasFailed());
+    manager.stop(false);
+    assertTrue(updater.isPrimed());
+  }
+
+  /**
+   * It's not clear why this tests fails on Windows and I don't have a test machine to find out.
+   */
+  @Test
+  @Disabled
+  void failingSetup() {
+    var source = new FailingSetupDataSource();
+    var updater = new VehicleRentalUpdater(PARAMS, source, null, REPOSITORY);
+
+    assertFalse(updater.isPrimed());
+    var manager = new MockManager(updater);
+    manager.startUpdaters();
+    assertTrue(source.hasFailed());
+    manager.stop(true);
+    assertTrue(updater.isPrimed());
+  }
+
+  static class MockManager extends GraphUpdaterManager {
+
+    public MockManager(VehicleRentalUpdater updater) {
+      super(
+        new WriteToGraphCallbacks().with(WriteDomain.STREET, WriteToGraphCallback.noop()),
+        RunnableUtils.NOOP,
+        List.of(updater)
+      );
+    }
+  }
+
+  private static class FailingDataSource implements VehicleRentalDataSource {
+
+    private final CompletableFuture<Boolean> hasFailed = new CompletableFuture<>();
+
+    @Override
+    public boolean update() {
+      hasFailed.complete(true);
+      throw new UpdaterConstructionException("An error occurred while setting up the source.");
+    }
+
+    @Override
+    public List<VehicleRentalPlace> getUpdates() {
+      return List.of();
+    }
+
+    private boolean hasFailed() {
+      try {
+        return hasFailed.get(5, TimeUnit.SECONDS);
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }
+  }
+
+  private static class FailingSetupDataSource implements VehicleRentalDataSource {
+
+    private final CompletableFuture<Boolean> hasFailed = new CompletableFuture<>();
+
+    @Override
+    public void setup() {
+      this.hasFailed.complete(true);
+      throw new UpdaterConstructionException("An error occurred while setting up the source.");
+    }
+
+    @Override
+    public boolean update() {
+      return true;
+    }
+
+    @Override
+    public List<VehicleRentalPlace> getUpdates() {
+      return List.of();
+    }
+
+    private boolean hasFailed() {
+      try {
+        return hasFailed.get(5, TimeUnit.SECONDS);
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }
+  }
+
+  private static class FakeParams implements VehicleRentalDataSourceParameters {
+
+    @Override
+    public String url() {
+      return "https://example.com";
+    }
+
+    @Nullable
+    @Override
+    public String network() {
+      return "Test";
+    }
+
+    @Override
+    public VehicleRentalSourceType sourceType() {
+      return VehicleRentalSourceType.GBFS;
+    }
+
+    @Override
+    public HttpHeaders httpHeaders() {
+      return HttpHeaders.empty();
+    }
+
+    @Override
+    public boolean allowRentalType(RentalPickupType rentalPickupType) {
+      return true;
+    }
+  }
+}

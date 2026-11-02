@@ -1,0 +1,98 @@
+package org.opentripplanner.graph_builder.module.osm.moduletests;
+
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.Set;
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.graph_builder.module.osm.OsmModuleTestFactory;
+import org.opentripplanner.osm.TestOsmProvider;
+import org.opentripplanner.osm.WayTestData;
+import org.opentripplanner.osm.model.OsmWay;
+import org.opentripplanner.service.osminfo.internal.DefaultOsmInfoGraphBuildRepository;
+import org.opentripplanner.street.graph.Graph;
+import org.opentripplanner.utils.collection.ListUtils;
+
+class BoardingLocationTest {
+
+  /**
+   * There is a one-way road which is also marked as a platform in Sky Campus which crashed OSM.
+   */
+  @Test
+  void oneWayPlatform() {
+    var way = WayTestData.platform()
+      .copy()
+      .withTag("access", "no")
+      .withTag("motor_vehicle", "permissive")
+      .withTag("oneway", "yes")
+      .build();
+    var provider = TestOsmProvider.of().addWay(way).build();
+
+    var graph = new Graph();
+    var osmInfoRepository = new DefaultOsmInfoGraphBuildRepository();
+
+    var osmModule = OsmModuleTestFactory.of(provider)
+      .withGraph(graph)
+      .withOsmInfoGraphBuildRepository(osmInfoRepository)
+      .builder()
+      .withBoardingAreaRefTags(Set.of("ref"))
+      .build();
+
+    osmModule.buildGraph();
+    var edges = ListUtils.ofIterable(graph.listEdges());
+    assertThat(edges).hasSize(1);
+
+    var platform = osmInfoRepository.findPlatform(edges.getFirst());
+
+    assertTrue(platform.isPresent());
+    assertEquals(Set.of("123"), platform.get().references());
+  }
+
+  @Test
+  void skipPlatformsWithoutReferences() {
+    var way = OsmWay.of().withTag("public_transport", "platform").build();
+    var provider = TestOsmProvider.of().addWay(way).build();
+
+    var graph = new Graph();
+    var osmInfoRepository = new DefaultOsmInfoGraphBuildRepository();
+    var osmModule = OsmModuleTestFactory.of(provider)
+      .withGraph(graph)
+      .withOsmInfoGraphBuildRepository(osmInfoRepository)
+      .builder()
+      .withBoardingAreaRefTags(Set.of("ref"))
+      .build();
+
+    osmModule.buildGraph();
+    var edges = ListUtils.ofIterable(graph.listEdges());
+    assertThat(edges).hasSize(2);
+
+    var platform = osmInfoRepository.findPlatform(edges.getFirst());
+    assertTrue(platform.isEmpty());
+  }
+
+  @Test
+  void testHighwayPlatform() {
+    var way = OsmWay.of().withTag("highway", "platform").withTag("ref", "1").build();
+
+    var graph = new Graph();
+    var osmInfoRepository = new DefaultOsmInfoGraphBuildRepository();
+    var provider = TestOsmProvider.of().addWay(way).build();
+
+    var osmModule = OsmModuleTestFactory.of(provider)
+      .withGraph(graph)
+      .withOsmInfoGraphBuildRepository(osmInfoRepository)
+      .builder()
+      .withBoardingAreaRefTags(Set.of("ref"))
+      .build();
+
+    osmModule.buildGraph();
+    var edges = ListUtils.ofIterable(graph.listEdges());
+    assertThat(edges).hasSize(2);
+
+    var platform = osmInfoRepository.findPlatform(edges.getFirst());
+
+    assertTrue(platform.isPresent());
+    assertEquals(Set.of("1"), platform.get().references());
+  }
+}

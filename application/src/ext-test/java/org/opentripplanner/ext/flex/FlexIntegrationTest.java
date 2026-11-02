@@ -1,0 +1,281 @@
+package org.opentripplanner.ext.flex;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.opentripplanner.street.model.StreetMode.FLEXIBLE;
+import static org.opentripplanner.street.search.TraverseMode.WALK;
+import static org.opentripplanner.transit.model.basic.TransitMode.BUS;
+
+import java.io.File;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.TestOtpModel;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.core.model.time.LocalDateRange;
+import org.opentripplanner.framework.application.OTPFeature;
+import org.opentripplanner.graph_builder.issue.api.DataImportIssueStore;
+import org.opentripplanner.graph_builder.module.TestStreetLinkerModule;
+import org.opentripplanner.graph_builder.module.transfer.DirectTransferGenerator;
+import org.opentripplanner.gtfs.graphbuilder.GtfsBundleTestFactory;
+import org.opentripplanner.gtfs.graphbuilder.GtfsModule;
+import org.opentripplanner.gtfs.graphbuilder.GtfsModuleTestFactory;
+import org.opentripplanner.model.GenericLocation;
+import org.opentripplanner.model.plan.Itinerary;
+import org.opentripplanner.routing.api.RoutingService;
+import org.opentripplanner.routing.api.request.RouteRequest;
+import org.opentripplanner.routing.api.request.framework.TimeAndCostPenalty;
+import org.opentripplanner.routing.api.request.request.JourneyRequest;
+import org.opentripplanner.standalone.api.TestServerContext;
+import org.opentripplanner.street.graph.Graph;
+import org.opentripplanner.street.model.StreetMode;
+import org.opentripplanner.transfer.regular.TransferRepository;
+import org.opentripplanner.transit.service.TransitRepository;
+
+/**
+ * This test checks the combination of transit and flex works.
+ */
+public class FlexIntegrationTest {
+
+  public static final GenericLocation OUTSIDE_FLEX_ZONE = GenericLocation.fromCoordinate(
+    33.7552,
+    -84.4631
+  );
+  public static final GenericLocation INSIDE_FLEX_ZONE = GenericLocation.fromCoordinate(
+    33.8694,
+    -84.6233
+  );
+  static Instant dateTime = ZonedDateTime.parse(
+    "2021-12-02T12:00:00-05:00[America/New_York]"
+  ).toInstant();
+
+  static Graph graph;
+
+  static TransitRepository transitRepository;
+
+  static TransferRepository transferRepository;
+
+  static RoutingService service;
+
+  @BeforeAll
+  static void setup() {
+    OTPFeature.enableFeatures(Map.of(OTPFeature.FlexRouting, true));
+    TestOtpModel model = FlexIntegrationTestData.cobbOsm();
+    graph = model.graph();
+    transitRepository = model.transitRepository();
+    transferRepository = model.transferRepository();
+    addGtfsToGraph(
+      graph,
+      transitRepository,
+      transferRepository,
+      List.of(
+        FlexIntegrationTestData.COBB_BUS_30_GTFS,
+        FlexIntegrationTestData.MARTA_BUS_856_GTFS,
+        FlexIntegrationTestData.COBB_FLEX_GTFS
+      )
+    );
+    var transitService = TestServerContext.createTransitService(
+      transitRepository,
+      transferRepository
+    );
+    service = TestServerContext.createRoutingService(graph, transitService, transferRepository);
+  }
+
+  @Test
+  void addFlexTripsAndPatternsToGraph() {
+    assertFalse(transitRepository.getAllTripPatterns().isEmpty());
+  }
+
+  @Test
+  void shouldReturnARouteTransferringFromBusToFlex() {
+    var itin = getItinerary(OUTSIDE_FLEX_ZONE, INSIDE_FLEX_ZONE, 4);
+
+    assertEquals(4, itin.legs().size());
+
+    var walkToBus = itin.streetLeg(0);
+    assertEquals(WALK, walkToBus.getMode());
+
+    var bus = itin.transitLeg(1);
+    assertEquals(BUS, bus.mode());
+    assertEquals("30", bus.route().getShortName());
+
+    var transfer = itin.streetLeg(2);
+    assertEquals(WALK, transfer.getMode());
+
+    var flex = itin.transitLeg(3);
+    assertEquals(BUS, flex.mode());
+    assertEquals("Zone 2", flex.route().getShortName());
+    assertTrue(flex.isFlexibleTrip());
+    assertEquals(
+      "corner of Story Place Southwest and service road (part of Flex Zone 2)",
+      flex.from().name.toString()
+    );
+    assertEquals("Destination (part of Flex Zone 2)", flex.to().name.toString());
+    assertEquals("2021-12-02T14:30-05:00[America/New_York]", flex.startTime().toString());
+    assertEquals("2021-12-02T15:00-05:00[America/New_York]", flex.endTime().toString());
+  }
+
+  @Test
+  void shouldReturnARouteWithTwoTransfers() {
+    var from = GenericLocation.fromStopId(new FeedScopedId("MARTA", "97266"), "ALEX DR@ALEX WAY");
+    var to = GenericLocation.fromCoordinate(33.86701256815635, -84.61787939071655);
+
+    var itin = getItinerary(from, to, 3);
+
+    assertEquals(5, itin.legs().size());
+
+    var firstBus = itin.transitLeg(0);
+    assertEquals(BUS, firstBus.mode());
+    assertEquals("856", firstBus.route().getShortName());
+
+    var transferToSecondBus = itin.streetLeg(1);
+    assertEquals(WALK, transferToSecondBus.getMode());
+
+    var secondBus = itin.transitLeg(2);
+    assertEquals(BUS, secondBus.mode());
+    assertEquals("30", secondBus.route().getShortName());
+
+    var transferToFlex = itin.streetLeg(3);
+    assertEquals(WALK, transferToFlex.getMode());
+
+    var finalFlex = itin.transitLeg(4);
+    assertEquals(BUS, finalFlex.mode());
+    assertEquals("Zone 2", finalFlex.route().getShortName());
+    assertTrue(finalFlex.isFlexibleTrip());
+    assertEquals("2021-12-02T15:00-05:00[America/New_York]", finalFlex.startTime().toString());
+    assertEquals("2021-12-02T15:30-05:00[America/New_York]", finalFlex.endTime().toString());
+  }
+
+  @Test
+  void flexDirect() {
+    // near flex zone
+    var from = GenericLocation.fromCoordinate(33.85281, -84.60271);
+    // in the middle of flex zone
+    var to = GenericLocation.fromCoordinate(33.86701256815635, -84.61787939071655);
+
+    List<Itinerary> itineraries = getItineraries(from, to, true);
+
+    assertTrue(
+      itineraries.stream().noneMatch(Itinerary::isWalkOnly),
+      "Should contain only flex itineraries"
+    );
+
+    var itin = itineraries.get(0);
+
+    // walk, flex
+    assertEquals(2, itin.legs().size());
+    assertEquals("2021-12-02T12:53:02-05:00[America/New_York]", itin.startTime().toString());
+    assertEquals(3236, itin.generalizedCost());
+
+    var walkToFlex = itin.streetLeg(0);
+    assertEquals(WALK, walkToFlex.getMode());
+
+    var flex = itin.transitLeg(1);
+    assertEquals(BUS, flex.mode());
+    assertEquals("Zone 2", flex.route().getShortName());
+    assertTrue(flex.isFlexibleTrip());
+
+    assertEquals("Transfer Point for Route 30", flex.from().name.toString());
+    assertEquals("Destination (part of Flex Zone 2)", flex.to().name.toString());
+
+    assertEquals("2021-12-02T13:00-05:00[America/New_York]", flex.startTime().toString());
+  }
+
+  @AfterAll
+  static void teardown() {
+    OTPFeature.enableFeatures(Map.of(OTPFeature.FlexRouting, false));
+  }
+
+  private static void addGtfsToGraph(
+    Graph graph,
+    TransitRepository transitRepository,
+    TransferRepository transferRepository,
+    List<File> gtfsFiles
+  ) {
+    // GTFS
+    var gtfsBundles = gtfsFiles.stream().map(GtfsBundleTestFactory::forTest).toList();
+    GtfsModule gtfsModule = GtfsModuleTestFactory.forTest(
+      gtfsBundles,
+      transitRepository,
+      graph,
+      LocalDateRange.ofUnbounded()
+    );
+    gtfsModule.buildGraph();
+
+    // link stations to streets
+    TestStreetLinkerModule.link(graph, transitRepository);
+
+    // link flex locations to streets
+    new AreaStopsToVerticesMapper(graph, transitRepository).buildGraph();
+
+    // generate direct transfers
+    var req = RouteRequest.defaultValue();
+
+    // we don't have a complete coverage of the entire area so use straight lines for transfers
+    new DirectTransferGenerator(
+      graph,
+      transitRepository,
+      transferRepository,
+      DataImportIssueStore.NOOP,
+      Duration.ofMinutes(10),
+      List.of(req)
+    ).buildGraph();
+
+    transitRepository.index();
+    graph.index();
+    transferRepository.index();
+  }
+
+  private Itinerary getItinerary(GenericLocation from, GenericLocation to, int index) {
+    List<Itinerary> itineraries = getItineraries(from, to, false);
+    return itineraries.get(index);
+  }
+
+  private static List<Itinerary> getItineraries(
+    GenericLocation from,
+    GenericLocation to,
+    boolean onlyDirect
+  ) {
+    RouteRequest request = RouteRequest.of()
+      .withDateTime(dateTime)
+      .withFrom(from)
+      .withTo(to)
+      .withNumItineraries(10)
+      .withSearchWindow(Duration.ofHours(2))
+      .withPreferences(p ->
+        p
+          .withStreet(s ->
+            s.withAccessEgress(ae -> ae.withPenalty(Map.of(FLEXIBLE, TimeAndCostPenalty.ZERO)))
+          )
+          .withWalk(walk -> walk.withSafetyFactor(0))
+      )
+      .withJourney(journeyBuilder -> {
+        var modes = JourneyRequest.DEFAULT.modes().copyOf();
+
+        if (onlyDirect) {
+          modes
+            .withDirectMode(FLEXIBLE)
+            .withAccessMode(StreetMode.WALK)
+            .withEgressMode(StreetMode.WALK);
+          journeyBuilder.withTransit(b -> b.disable());
+        } else {
+          modes.withEgressMode(FLEXIBLE);
+        }
+
+        journeyBuilder.withModes(modes.build());
+      })
+      .buildRequest();
+
+    var result = service.route(request);
+    var itineraries = result.getTripPlan().itineraries;
+
+    assertFalse(itineraries.isEmpty());
+    return itineraries;
+  }
+}

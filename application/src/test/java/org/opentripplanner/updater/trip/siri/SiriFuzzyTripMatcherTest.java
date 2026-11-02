@@ -1,0 +1,139 @@
+package org.opentripplanner.updater.trip.siri;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.opentripplanner.core.model.id.FeedScopedIdForTestFactory.id;
+import static org.opentripplanner.updater.spi.UpdateErrorType.INVALID_DEPARTURE_TIME;
+import static org.opentripplanner.updater.spi.UpdateErrorType.MULTIPLE_FUZZY_TRIP_MATCHES;
+import static org.opentripplanner.updater.spi.UpdateErrorType.UNKNOWN_STOP;
+import static org.opentripplanner.updater.spi.UpdateResultAssertions.assertFailure;
+
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.transit.model.TransitTestEnvironment;
+import org.opentripplanner.transit.model.TransitTestEnvironmentBuilder;
+import org.opentripplanner.transit.model.TripInput;
+import org.opentripplanner.transit.model.site.RegularStop;
+import org.opentripplanner.updater.spi.UpdateException;
+import org.opentripplanner.updater.trip.RealtimeTestConstants;
+import uk.org.siri.siri21.EstimatedVehicleJourney;
+
+class SiriFuzzyTripMatcherTest implements RealtimeTestConstants {
+
+  private final TransitTestEnvironmentBuilder ENV_BUILDER = TransitTestEnvironment.of();
+  private final RegularStop STOP_A = ENV_BUILDER.stop(STOP_A_ID);
+  private final RegularStop STOP_B = ENV_BUILDER.stop(STOP_B_ID);
+
+  @Test
+  void match() {
+    TripInput trip1Input = tripInput(TRIP_1_ID);
+
+    var env = ENV_BUILDER.addTrip(trip1Input).build();
+    var evj = estimatedVehicleJourney(env);
+
+    var result = match(evj, env);
+    assertEquals(TRIP_1_ID, result.trip().getId().getId());
+  }
+
+  @Test
+  void multipleMatches() {
+    var trip1input = tripInput(TRIP_1_ID);
+    var trip2input = tripInput(TRIP_2_ID);
+
+    var env = ENV_BUILDER.addTrip(trip1input).addTrip(trip2input).build();
+
+    var evj = estimatedVehicleJourney(env);
+
+    assertFailure(MULTIPLE_FUZZY_TRIP_MATCHES, () -> match(evj, env));
+  }
+
+  @Test
+  void scheduledStopPoint() {
+    var scheduledStopPointId = "ssp-1";
+    var trip1input = tripInput(TRIP_1_ID);
+
+    var env = ENV_BUILDER.addTrip(trip1input)
+      .addScheduledStopPointMapping(id(scheduledStopPointId), STOP_B)
+      .build();
+
+    var journey = new SiriEtBuilder(env.localTimeParser())
+      .withEstimatedCalls(builder ->
+        builder
+          .call(STOP_A)
+          .departAimedExpected("00:10:00", "00:10:00")
+          .call(scheduledStopPointId)
+          .arriveAimedExpected("00:20:00", "00:20:00")
+      )
+      .buildEstimatedVehicleJourney();
+
+    var result = match(journey, env);
+    assertEquals(TRIP_1_ID, result.trip().getId().getId());
+  }
+
+  @Test
+  void unknownStopPointRef() {
+    var trip1input = tripInput(TRIP_1_ID);
+
+    var env = ENV_BUILDER.addTrip(trip1input).build();
+
+    var journey = new SiriEtBuilder(env.localTimeParser())
+      .withEstimatedCalls(builder ->
+        builder
+          .call(STOP_A)
+          .departAimedExpected("00:10:00", "00:10:00")
+          .call("SOME_MADE_UP_ID")
+          .arriveAimedExpected("00:20:00", "00:20:00")
+      )
+      .buildEstimatedVehicleJourney();
+
+    assertFailure(UNKNOWN_STOP, () -> match(journey, env));
+  }
+
+  @Test
+  void noDepartureTime() {
+    var trip1input = tripInput(TRIP_1_ID);
+
+    var env = ENV_BUILDER.addTrip(trip1input).build();
+
+    var journey = new SiriEtBuilder(env.localTimeParser())
+      .withEstimatedCalls(builder ->
+        builder
+          .call(STOP_A)
+          .departAimedExpected(null, null)
+          .call("SOME_MADE_UP_ID")
+          .arriveAimedExpected("00:20:00", "00:20:00")
+      )
+      .buildEstimatedVehicleJourney();
+
+    assertFailure(INVALID_DEPARTURE_TIME, () -> match(journey, env));
+  }
+
+  private static TripAndPattern match(EstimatedVehicleJourney evj, TransitTestEnvironment env)
+    throws UpdateException {
+    var transitService = env.transitService();
+    var cache = SiriFuzzyTripMatcherCache.create(env.transitRepository());
+    var fuzzyMatcher = new SiriFuzzyTripMatcher(cache, transitService);
+    return fuzzyMatcher.match(
+      EstimatedVehicleJourneyWrapper.of(evj),
+      new EntityResolver(transitService, env.feedId()),
+      transitService::findTimetable,
+      transitService::findNewTripPatternForModifiedTrip
+    );
+  }
+
+  private EstimatedVehicleJourney estimatedVehicleJourney(TransitTestEnvironment env) {
+    return new SiriEtBuilder(env.localTimeParser())
+      .withEstimatedCalls(builder ->
+        builder
+          .call(STOP_A)
+          .departAimedExpected("00:10:00", "00:10:00")
+          .call(STOP_B)
+          .arriveAimedExpected("00:20:00", "00:20:00")
+      )
+      .buildEstimatedVehicleJourney();
+  }
+
+  private TripInput tripInput(String trip1Id) {
+    return TripInput.of(trip1Id)
+      .addStop(STOP_A, "0:10:00", "0:10:00")
+      .addStop(STOP_B, "0:20:00", "0:20:00");
+  }
+}

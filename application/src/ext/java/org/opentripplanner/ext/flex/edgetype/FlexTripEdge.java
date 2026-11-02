@@ -1,0 +1,109 @@
+package org.opentripplanner.ext.flex.edgetype;
+
+import java.time.LocalDate;
+import java.util.Objects;
+import org.locationtech.jts.geom.LineString;
+import org.opentripplanner.core.model.i18n.I18NString;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.ext.flex.FlexParameters;
+import org.opentripplanner.ext.flex.flexpathcalculator.FlexPath;
+import org.opentripplanner.ext.flex.trip.FlexTrip;
+import org.opentripplanner.street.model.edge.Edge;
+import org.opentripplanner.street.model.vertex.Vertex;
+import org.opentripplanner.street.search.TraverseMode;
+import org.opentripplanner.street.search.state.State;
+import org.opentripplanner.street.search.state.StateEditor;
+
+/**
+ * Flex trips edges are not connected to the graph.
+ */
+public class FlexTripEdge extends Edge {
+
+  private final FeedScopedId fromStopId;
+  private final FeedScopedId toStopId;
+  private final FlexTrip<?, ?> trip;
+  private final int boardStopPosInPattern;
+  private final int alightStopPosInPattern;
+  private final LocalDate serviceDate;
+  private final FlexPath flexPath;
+  private final FlexParameters flexParameters;
+
+  public FlexTripEdge(
+    Vertex v1,
+    Vertex v2,
+    FeedScopedId fromStopId,
+    FeedScopedId toStopId,
+    FlexTrip<?, ?> trip,
+    int boardStopPosInPattern,
+    int alightStopPosInPattern,
+    LocalDate serviceDate,
+    FlexPath flexPath,
+    FlexParameters flexParameters
+  ) {
+    super(v1, v2);
+    this.fromStopId = fromStopId;
+    this.toStopId = toStopId;
+    this.trip = trip;
+    this.boardStopPosInPattern = boardStopPosInPattern;
+    this.alightStopPosInPattern = alightStopPosInPattern;
+    this.serviceDate = serviceDate;
+    this.flexPath = Objects.requireNonNull(flexPath);
+    this.flexParameters = flexParameters;
+  }
+
+  public FeedScopedId fromStopId() {
+    return fromStopId;
+  }
+
+  public FeedScopedId toStopId() {
+    return toStopId;
+  }
+
+  public int boardStopPosInPattern() {
+    return boardStopPosInPattern;
+  }
+
+  public int alightStopPosInPattern() {
+    return alightStopPosInPattern;
+  }
+
+  public LocalDate serviceDate() {
+    return serviceDate;
+  }
+
+  public int getTimeInSeconds() {
+    return flexPath.durationSeconds;
+  }
+
+  public FlexTrip<?, ?> getFlexTrip() {
+    return trip;
+  }
+
+  @Override
+  public I18NString getName() {
+    return null;
+  }
+
+  @Override
+  public LineString getGeometry() {
+    return flexPath.getGeometry();
+  }
+
+  @Override
+  public double getDistanceMeters() {
+    return flexPath.distanceMeters;
+  }
+
+  @Override
+  public State[] traverse(State s0) {
+    StateEditor editor = s0.edit(this);
+    editor.setBackMode(TraverseMode.FLEX);
+    int timeInSeconds = getTimeInSeconds();
+    editor.incrementTimeInSeconds(timeInSeconds);
+    editor.incrementWeight(
+      flexParameters.reluctance() * timeInSeconds + flexParameters.boardCost()
+    );
+    editor.resetEnteredNoThroughTrafficArea();
+    return editor.makeStateArray();
+  }
+}

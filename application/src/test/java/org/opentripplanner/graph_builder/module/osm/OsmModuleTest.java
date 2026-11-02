@@ -1,0 +1,166 @@
+package org.opentripplanner.graph_builder.module.osm;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.opentripplanner.street.model.StreetTraversalPermission.ALL;
+
+import java.io.File;
+import java.util.HashSet;
+import java.util.Set;
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.osm.DefaultOsmProvider;
+import org.opentripplanner.street.graph.Graph;
+import org.opentripplanner.street.internal.DefaultStreetRepository;
+import org.opentripplanner.street.model.edge.Edge;
+import org.opentripplanner.street.model.edge.StreetEdge;
+import org.opentripplanner.street.model.vertex.BarrierVertex;
+import org.opentripplanner.street.model.vertex.IntersectionVertex;
+import org.opentripplanner.street.model.vertex.Vertex;
+import org.opentripplanner.street.model.vertex.VertexLabel;
+import org.opentripplanner.test.support.ResourceLoader;
+
+public class OsmModuleTest {
+
+  private static final ResourceLoader RESOURCE_LOADER = ResourceLoader.of(OsmModuleTest.class);
+
+  @Test
+  public void testGraphBuilder() {
+    var graph = new Graph();
+
+    File file = RESOURCE_LOADER.file("map.osm.pbf");
+
+    DefaultOsmProvider provider = new DefaultOsmProvider(file, true);
+
+    OsmModule osmModule = OsmModuleTestFactory.of(provider)
+      .withGraph(graph)
+      .builder()
+      .withAreaVisibility(true)
+      .build();
+
+    osmModule.buildGraph();
+
+    // Kamiennogorska at south end of segment
+    Vertex v1 = graph.getVertex(VertexLabel.osm(280592578));
+
+    // Kamiennogorska at Mariana Smoluchowskiego
+    Vertex v2 = graph.getVertex(VertexLabel.osm(288969929));
+
+    // Mariana Smoluchowskiego, north end
+    Vertex v3 = graph.getVertex(VertexLabel.osm(280107802));
+
+    // Mariana Smoluchowskiego, south end (of segment connected to v2)
+    Vertex v4 = graph.getVertex(VertexLabel.osm(288970952));
+
+    assertNotNull(v1);
+    assertNotNull(v2);
+    assertNotNull(v3);
+    assertNotNull(v4);
+
+    Edge e1 = null;
+    Edge e2 = null;
+    Edge e3 = null;
+    for (Edge e : v2.getOutgoing()) {
+      if (e.getToVertex() == v1) {
+        e1 = e;
+      } else if (e.getToVertex() == v3) {
+        e2 = e;
+      } else if (e.getToVertex() == v4) {
+        e3 = e;
+      }
+    }
+
+    assertNotNull(e1);
+    assertNotNull(e2);
+    assertNotNull(e3);
+
+    assertTrue(
+      e1.getDefaultName().contains("Kamiennog\u00F3rska"),
+      "name of e1 must be like \"Kamiennog\u00F3rska\"; was " + e1.getDefaultName()
+    );
+    assertTrue(
+      e2.getDefaultName().contains("Mariana Smoluchowskiego"),
+      "name of e2 must be like \"Mariana Smoluchowskiego\"; was " + e2.getDefaultName()
+    );
+  }
+
+  /**
+   * Detailed testing of OSM graph building using a very small chunk of NYC (SOHO-ish).
+   */
+  @Test
+  public void testBuildGraphDetailed() {
+    var gg = new Graph();
+
+    File file = RESOURCE_LOADER.file("NYC_small.osm.pbf");
+    var provider = new DefaultOsmProvider(file, true);
+
+    var streetRepository = new DefaultStreetRepository();
+    var osmModule = OsmModuleTestFactory.of(provider)
+      .withGraph(gg)
+      .withStreetRepository(streetRepository)
+      .builder()
+      .withAreaVisibility(true)
+      .build();
+
+    osmModule.buildGraph();
+
+    // These vertices are labeled in the OSM file as having traffic lights.
+    IntersectionVertex iv1 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(1919595918));
+    IntersectionVertex iv2 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(42442273));
+    IntersectionVertex iv3 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(1919595927));
+    IntersectionVertex iv4 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(42452026));
+    assertTrue(iv1.hasDrivingTrafficLight());
+    assertTrue(iv2.hasDrivingTrafficLight());
+    assertTrue(iv3.hasDrivingTrafficLight());
+    assertTrue(iv4.hasDrivingTrafficLight());
+
+    // These are not.
+    IntersectionVertex iv5 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(42435485));
+    IntersectionVertex iv6 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(42439335));
+    IntersectionVertex iv7 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(42436761));
+    IntersectionVertex iv8 = (IntersectionVertex) gg.getVertex(VertexLabel.osm(42442291));
+    assertFalse(iv5.hasDrivingTrafficLight());
+    assertFalse(iv6.hasDrivingTrafficLight());
+    assertFalse(iv7.hasDrivingTrafficLight());
+    assertFalse(iv8.hasDrivingTrafficLight());
+
+    Set<VertexPair> edgeEndpoints = new HashSet<>();
+    for (StreetEdge se : gg.findEdges(StreetEdge.class)) {
+      var endpoints = new VertexPair(se.getFromVertex(), se.getToVertex());
+      // Check that we don't get any duplicate edges on this small graph.
+      if (edgeEndpoints.contains(endpoints)) {
+        fail();
+      }
+      edgeEndpoints.add(endpoints);
+    }
+
+    assertEquals(20, streetRepository.streetModelDetails().maxCarSpeed());
+  }
+
+  /**
+   * Test that a barrier vertex at ending street will get no access limit
+   */
+  @Test
+  void testBarrierAtEnd() {
+    var graph = new Graph();
+    var file = RESOURCE_LOADER.file("accessno-at-end.pbf");
+    var provider = new DefaultOsmProvider(file, false);
+
+    OsmModuleTestFactory.of(provider).withGraph(graph).builder().build().buildGraph();
+
+    Vertex start = graph.getVertex(VertexLabel.osm(1));
+    Vertex end = graph.getVertex(VertexLabel.osm(3));
+
+    assertNotNull(start);
+    assertNotNull(end);
+    assertEquals(end.getClass(), BarrierVertex.class);
+    var barrier = (BarrierVertex) end;
+
+    // assert that pruning removed traversal restrictions
+    assertEquals(barrier.getBarrierPermissions(), ALL);
+  }
+
+  private record VertexPair(Vertex v0, Vertex v1) {}
+}

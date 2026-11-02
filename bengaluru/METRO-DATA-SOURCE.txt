@@ -1,0 +1,22 @@
+Metro integration provenance
+
+1. The uploaded archive archive(20260916-094632).zip was inspected. It contains:
+   - BMTCB routes
+   - LTRAINB routes
+   - an METROB agency row
+   - no routes belonging to METROB
+   Therefore it is not a usable Namma Metro GTFS feed.
+
+2. Metro station/network data used for this integration:
+   Public GitHub dataset:
+   https://github.com/Vinayak-Chinchakhandi/Bengaluru-Metro-Network-Dataset
+
+3. The current network rows used in this package contain station code, station name,
+   line, sequence, interchange flag, latitude, longitude, distance to next station,
+   and line color.
+
+4. Timetable times in the generated GTFS are planning approximations generated from
+   the station network. They are not presented as exact official BMRCL train times.
+
+5. For a production system, replace bmrcl-namma-metro-gtfs.zip with a current official
+   BMRCL GTFS feed if one is made available, or regenerate from a current validated feed.

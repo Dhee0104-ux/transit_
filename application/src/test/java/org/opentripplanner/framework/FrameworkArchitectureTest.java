@@ -1,0 +1,70 @@
+package org.opentripplanner.framework;
+
+import static org.opentripplanner.OtpArchitectureModules.DOMAIN_CORE_FRAMEWORK;
+import static org.opentripplanner.OtpArchitectureModules.DOMAIN_CORE_MODEL;
+import static org.opentripplanner.OtpArchitectureModules.FRAMEWORK;
+import static org.opentripplanner.OtpArchitectureModules.GNU_TROVE;
+import static org.opentripplanner.OtpArchitectureModules.OTP_UTILS;
+
+import org.junit.jupiter.api.Test;
+import org.opentripplanner._support.arch.Module;
+import org.opentripplanner._support.arch.Package;
+
+public class FrameworkArchitectureTest {
+
+  private static final Package APACHE_HTTP = Package.of("org.apache.hc..");
+
+  private static final Module XML_MODULES = Module.of(
+    Package.of("com.fasterxml.jackson.."),
+    Package.of("org.w3c.dom"),
+    Package.of("org.xml.sax")
+  );
+  private static final Package APPLICATION = FRAMEWORK.subPackage("application");
+  private static final Package COLLECTION = FRAMEWORK.subPackage("collection");
+  private static final Package FUNCTIONAL = FRAMEWORK.subPackage("functional");
+  private static final Package I18N = DOMAIN_CORE_MODEL.subPackage("i18n");
+  private static final Package IO = FRAMEWORK.subPackage("io");
+  private static final Package LOGGING = FRAMEWORK.subPackage("logging");
+  private static final Package RESOURCES = DOMAIN_CORE_FRAMEWORK.subPackage("resources");
+  private static final Package TIME = FRAMEWORK.subPackage("time");
+
+  @Test
+  void enforceApplicationPackageDependencies() {
+    APPLICATION.dependsOn(OTP_UTILS).verify();
+  }
+
+  @Test
+  void enforceCollectionPackageDependencies() {
+    COLLECTION.dependsOn(GNU_TROVE).verify();
+  }
+
+  @Test
+  void enforceFunctionalPackageDependencies() {
+    FUNCTIONAL.verify();
+  }
+
+  @Test
+  void enforceI18nPackageDependencies() {
+    I18N.dependsOn(RESOURCES).verify();
+  }
+
+  @Test
+  void enforceIoPackageDependencies() {
+    IO.dependsOn(APACHE_HTTP, XML_MODULES).verify();
+  }
+
+  @Test
+  void enforceLoggingPackageDependencies() {
+    LOGGING.dependsOn(OTP_UTILS).verify();
+  }
+
+  @Test
+  void enforceResourcesPackageDependencies() {
+    RESOURCES.verify();
+  }
+
+  @Test
+  void enforceTimePackageDependencies() {
+    TIME.dependsOn(OTP_UTILS).verify();
+  }
+}

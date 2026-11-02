@@ -1,0 +1,121 @@
+package org.opentripplanner.apis.transmodel.support;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import graphql.ExecutionInput;
+import graphql.execution.ExecutionContext;
+import graphql.schema.DataFetchingEnvironment;
+import graphql.schema.DataFetchingEnvironmentImpl;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.apis.support.InvalidInputException;
+import org.opentripplanner.apis.support.graphql.DataFetchingSupport;
+
+public class GqlUtilTest {
+
+  static final ExecutionContext EXECUTION_CONTEXT;
+  private static final String TEST_ARGUMENT = "testArgument";
+
+  static {
+    ExecutionInput executionInput = ExecutionInput.newExecutionInput()
+      .query("")
+      .locale(Locale.ENGLISH)
+      .build();
+
+    EXECUTION_CONTEXT = DataFetchingSupport.executionContext(executionInput);
+  }
+
+  @Test
+  void testGetPositiveNonNullIntegerArgumentWithStrictlyPositiveValue() {
+    var env = buildEnvWithTestValue(1);
+    assertEquals(1, GqlUtil.getPositiveNonNullIntegerArgument(env, TEST_ARGUMENT));
+  }
+
+  @Test
+  void testGetPositiveNonNullIntegerArgumentWithZeroValue() {
+    var env = buildEnvWithTestValue(0);
+    assertEquals(0, GqlUtil.getPositiveNonNullIntegerArgument(env, TEST_ARGUMENT));
+  }
+
+  @Test
+  void testGetPositiveNonNullIntegerArgumentWithNegativeValue() {
+    var env = buildEnvWithTestValue(-1);
+    assertThrows(InvalidInputException.class, () ->
+      GqlUtil.getPositiveNonNullIntegerArgument(env, TEST_ARGUMENT)
+    );
+  }
+
+  @Test
+  void testGetPositiveNonNullIntegerArgumentWithNullValue() {
+    var env = buildEnvWithTestValue(null);
+    assertThrows(InvalidInputException.class, () ->
+      GqlUtil.getPositiveNonNullIntegerArgument(env, TEST_ARGUMENT)
+    );
+  }
+
+  @Test
+  void testGetPositiveNonNullIntegerArgumentWithoutValue() {
+    var env = DataFetchingEnvironmentImpl.newDataFetchingEnvironment(EXECUTION_CONTEXT).build();
+    assertThrows(InvalidInputException.class, () ->
+      GqlUtil.getPositiveNonNullIntegerArgument(env, TEST_ARGUMENT)
+    );
+  }
+
+  private static DataFetchingEnvironment buildEnvWithTestValue(Integer value) {
+    Map<String, Object> argsMap = new HashMap<>();
+    argsMap.put(TEST_ARGUMENT, value);
+    return DataFetchingEnvironmentImpl.newDataFetchingEnvironment(EXECUTION_CONTEXT)
+      .arguments(argsMap)
+      .build();
+  }
+
+  @Test
+  void testGetLocaleWithLangArgument() {
+    var env = DataFetchingEnvironmentImpl.newDataFetchingEnvironment(EXECUTION_CONTEXT)
+      .locale(Locale.ENGLISH)
+      .arguments(Map.of("lang", "fr"))
+      .build();
+
+    var locale = GqlUtil.getLocale(env);
+
+    assertEquals(Locale.FRENCH, locale);
+  }
+
+  @Test
+  void testGetLocaleWithLanguageArgument() {
+    var env = DataFetchingEnvironmentImpl.newDataFetchingEnvironment(EXECUTION_CONTEXT)
+      .locale(Locale.ENGLISH)
+      .arguments(Map.of("language", "fr"))
+      .build();
+
+    var locale = GqlUtil.getLocale(env);
+
+    assertEquals(Locale.FRENCH, locale);
+  }
+
+  @Test
+  void testGetLocaleWithBothArguments() {
+    var env = DataFetchingEnvironmentImpl.newDataFetchingEnvironment(EXECUTION_CONTEXT)
+      .locale(Locale.ENGLISH)
+      .arguments(Map.of("lang", "de", "language", "fr"))
+      .build();
+
+    var locale = GqlUtil.getLocale(env);
+
+    assertEquals(Locale.GERMAN, locale);
+  }
+
+  @Test
+  void testGetLocaleWithoutArguments() {
+    var env = DataFetchingEnvironmentImpl.newDataFetchingEnvironment(EXECUTION_CONTEXT)
+      .locale(Locale.ENGLISH)
+      .build();
+
+    var locale = GqlUtil.getLocale(env);
+
+    assertEquals(Locale.ENGLISH, locale);
+  }
+}

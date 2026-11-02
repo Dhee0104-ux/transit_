@@ -1,0 +1,785 @@
+package org.opentripplanner.standalone.config;
+
+import static org.opentripplanner.framework.application.OtpFileNames.BUILD_CONFIG_FILENAME;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V1_5;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V2_0;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V2_1;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V2_10;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V2_2;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V2_5;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V2_7;
+import static org.opentripplanner.standalone.config.framework.json.OtpVersion.V2_9;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
+import java.net.URI;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Pattern;
+import javax.annotation.Nullable;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.core.model.time.LocalDateRange;
+import org.opentripplanner.datastore.api.OtpDataStoreConfig;
+import org.opentripplanner.ext.dataoverlay.configuration.DataOverlayConfig;
+import org.opentripplanner.ext.datastore.gs.config.GsConfig;
+import org.opentripplanner.ext.edgenaming.EdgeNamerFactory;
+import org.opentripplanner.ext.emission.config.EmissionConfig;
+import org.opentripplanner.ext.emission.parameters.EmissionParameters;
+import org.opentripplanner.ext.empiricaldelay.config.EmpiricalDelayConfig;
+import org.opentripplanner.ext.empiricaldelay.parameters.EmpiricalDelayParameters;
+import org.opentripplanner.ext.fares.FaresConfiguration;
+import org.opentripplanner.ext.vehiclerentalgeofencing.config.VehicleRentalGeofencingConfig;
+import org.opentripplanner.ext.vehiclerentalgeofencing.parameters.VehicleRentalGeofencingParameters;
+import org.opentripplanner.graph_builder.module.cache.GraphBuildCacheParameters;
+import org.opentripplanner.graph_builder.module.ned.parameter.DemExtractParameters;
+import org.opentripplanner.graph_builder.module.ned.parameter.DemExtractParametersList;
+import org.opentripplanner.graph_builder.module.osm.EdgeNamer;
+import org.opentripplanner.graph_builder.module.osm.parameters.OsmExtractParameters;
+import org.opentripplanner.graph_builder.module.osm.parameters.OsmExtractParametersList;
+import org.opentripplanner.graph_builder.module.transfer.api.RegularTransferParameters;
+import org.opentripplanner.gtfs.config.GtfsDefaultParameters;
+import org.opentripplanner.netex.config.NetexFeedParameters;
+import org.opentripplanner.osm.model.CompoundRefTagGroup;
+import org.opentripplanner.standalone.config.buildconfig.DemConfig;
+import org.opentripplanner.standalone.config.buildconfig.GraphBuildCacheConfig;
+import org.opentripplanner.standalone.config.buildconfig.GtfsConfig;
+import org.opentripplanner.standalone.config.buildconfig.IslandPruningConfig;
+import org.opentripplanner.standalone.config.buildconfig.NetexConfig;
+import org.opentripplanner.standalone.config.buildconfig.OsmConfig;
+import org.opentripplanner.standalone.config.buildconfig.RegularTransferConfig;
+import org.opentripplanner.standalone.config.buildconfig.S3BucketConfig;
+import org.opentripplanner.standalone.config.buildconfig.TransitFeedConfig;
+import org.opentripplanner.standalone.config.buildconfig.TransitFeeds;
+import org.opentripplanner.standalone.config.framework.json.NodeAdapter;
+import org.opentripplanner.standalone.config.sandbox.DataOverlayConfigMapper;
+import org.opentripplanner.street.geometry.CompactElevationProfile;
+import org.opentripplanner.street.model.StreetConstants;
+import org.opentripplanner.utils.lang.ObjectUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class is an object representation of the 'build-config.json'.
+ * <p>
+ * These are parameters that when changed, necessitate a Graph rebuild. They are distinct from the
+ * RouterParameters which can be applied to a pre-built graph or on the fly at runtime. Eventually
+ * both classes may be initialized from the same config file so make sure there is no overlap in the
+ * JSON keys used.
+ * <p>
+ * These used to be command line parameters, but there were getting to be too many of them and
+ * besides, we want to allow different graph build configuration for each Graph.
+ * <p>
+ * ones trigger a rebuild ...or just feed the same JSON tree to two different classes, one of which
+ * is the build configuration and the other is the router configuration.
+ */
+public class BuildConfig implements OtpDataStoreConfig {
+
+  private static final Logger LOG = LoggerFactory.getLogger(BuildConfig.class);
+
+  public static final BuildConfig DEFAULT = new BuildConfig(
+    MissingNode.getInstance(),
+    "DEFAULT",
+    false
+  );
+
+  private static final double DEFAULT_SUBWAY_ACCESS_TIME_MINUTES = 2.0;
+
+  /**
+   * Match all filenames that contains "gtfs". The pattern is NOT Case sensitive.
+   */
+  private static final String DEFAULT_GTFS_PATTERN = "(?i)gtfs";
+
+  /**
+   * Match all filenames that contain "netex". The pattern is NOT Case sensitive.
+   */
+  private static final String DEFAULT_NETEX_PATTERN = "(?i)netex";
+
+  /**
+   * Match all filenames that ends with suffix {@code .pbf}, {@code .osm} or {@code .osm.xml}. The
+   * pattern is NOT Case sensitive.
+   */
+  private static final String DEFAULT_OSM_PATTERN = "(?i)(\\.pbf|\\.osm|\\.osm\\.xml)$";
+
+  /**
+   * Default: {@code (?i).tiff?$} - Match all filenames that ends with suffix {@code .tif} or
+   * {@code .tiff}. The pattern is NOT Case sensitive.
+   */
+  private static final String DEFAULT_DEM_PATTERN = "(?i)\\.tiff?$";
+
+  /**
+   * The root adaptor kept for reference and (de)serialization.
+   */
+  private final NodeAdapter root;
+
+  public final String configVersion;
+
+  public final boolean dataImportReport;
+
+  public final int maxDataImportIssuesPerFile;
+
+  public final double subwayAccessTime;
+
+  public final boolean embedRouterConfig;
+
+  public final boolean areaVisibility;
+
+  public final boolean platformEntriesLinking;
+
+  /** See {@link S3BucketConfig}. */
+  public final S3BucketConfig elevationBucket;
+
+  /**
+   * A specific fares service to use.
+   */
+  public final JsonNode fareConfig;
+
+  private final Pattern netexLocalFilePattern;
+
+  private final Pattern gtfsLocalFilePattern;
+
+  private final Pattern osmLocalFilePattern;
+
+  private final Pattern demLocalFilePattern;
+
+  private final URI streetGraph;
+
+  private final URI graph;
+
+  private final URI buildReportDir;
+
+  /**
+   * A custom OSM namer to use.
+   */
+  public final EdgeNamer.EdgeNamerType edgeNamer;
+
+  public final boolean osmCacheDataInMem;
+
+  /** See {@link IslandPruningConfig}. */
+  public final IslandPruningConfig islandPruning;
+
+  public final NetexFeedParameters netexDefaults;
+  public final GtfsDefaultParameters gtfsDefaults;
+
+  public final DemExtractParameters demDefaults;
+  public final OsmExtractParameters osmDefaults;
+
+  private final RegularTransferParameters regularTransferParameters;
+
+  public final int maxAreaNodes;
+
+  public final DataOverlayConfig dataOverlay;
+  public final double maxStopToShapeSnapDistance;
+  public final Set<String> boardingLocationTags;
+  public final List<CompoundRefTagGroup> elevatorRefTags;
+  private final GraphBuildCacheConfig cache;
+  public final DemExtractParametersList dem;
+  public final OsmExtractParametersList osm;
+  public final EmissionParameters emission;
+  public final EmpiricalDelayParameters empiricalDelay;
+
+  @Nullable
+  public final VehicleRentalGeofencingParameters vehicleRentalGeofencing;
+
+  public final TransitFeeds transitFeeds;
+  public final boolean staticParkAndRide;
+  public final boolean staticBikeParkAndRide;
+  public final boolean includeInclinedEdgeLevelInfo;
+  public final double distanceBetweenElevationSamples;
+  public final double maxElevationPropagationMeters;
+  public final boolean includeEllipsoidToGeoidDifference;
+  public final boolean multiThreadElevationCalculations;
+  public final int elevationTileCacheSizeMB;
+  public final LocalDate transitServiceStart;
+  public final LocalDate transitServiceEnd;
+  public final ZoneId transitModelTimeZone;
+  private final List<FeedScopedId> transitRouteToStationCentroid;
+  public final URI stopConsolidation;
+  private final GsConfig gsConfig;
+
+  /**
+   * Set all parameters from the given Jackson JSON tree, applying defaults. Supplying
+   * MissingNode.getInstance() will cause all the defaults to be applied. This could be done
+   * automatically with the "reflective query scraper" but it's less type safe and less clear. Until
+   * that class is more type safe, it seems simpler to just list out the parameters by name here.
+   */
+  public BuildConfig(JsonNode node, String source, boolean logUnusedParams) {
+    this(new NodeAdapter(node, source), logUnusedParams);
+  }
+
+  /**
+   * @see #BuildConfig(JsonNode, String, boolean)
+   */
+  public BuildConfig(NodeAdapter root, boolean logUnusedParams) {
+    this.root = root;
+    // Keep this list of BASIC parameters sorted alphabetically on config PARAMETER name
+    this.areaVisibility = root
+      .of("areaVisibility")
+      .since(V1_5)
+      .summary("Perform visibility calculations.")
+      .description(
+        """
+        If this is `true` OTP attempts to calculate a path straight through an OSM area using the
+        shortest way rather than around the edge of it. (These calculations can be time consuming).
+        """
+      )
+      .asBoolean(false);
+    this.cache = GraphBuildCacheConfig.fromConfig(root);
+    this.configVersion = root
+      .of("configVersion")
+      .since(V2_1)
+      .summary("Deployment version of the *" + BUILD_CONFIG_FILENAME + "*.")
+      .description(OtpConfig.CONFIG_VERSION_DESCRIPTION)
+      .asString(null);
+    this.dataImportReport = root
+      .of("dataImportReport")
+      .since(V2_0)
+      .summary("Generate nice HTML report of Graph errors/warnings")
+      .description("The reports are stored in the same location as the graph.")
+      .asBoolean(false);
+    this.distanceBetweenElevationSamples = root
+      .of("distanceBetweenElevationSamples")
+      .since(V2_0)
+      .summary("The distance between elevation samples in meters.")
+      .description(
+        "The default is the approximate resolution of 1/3 arc-second NED data. This should not " +
+          "be smaller than the horizontal resolution of the height data used."
+      )
+      .asDouble(CompactElevationProfile.DEFAULT_DISTANCE_BETWEEN_SAMPLES_METERS);
+    this.elevationBucket = S3BucketConfig.fromConfig(root, "elevationBucket");
+    this.embedRouterConfig = root
+      .of("embedRouterConfig")
+      .since(V2_0)
+      .summary(
+        "Embed the Router config in the graph, which allows it to be sent to a server fully " +
+          "configured over the wire."
+      )
+      .asBoolean(true);
+    this.includeEllipsoidToGeoidDifference = root
+      .of("includeEllipsoidToGeoidDifference")
+      .since(V2_0)
+      .summary(
+        "Include the Ellipsoid to Geoid difference in the calculations of every point along " +
+          "every StreetWithElevationEdge."
+      )
+      .description(
+        """
+        When set to true (it is false by default), the elevation module will include the Ellipsoid to
+        Geoid difference in the calculations of every point along every StreetWithElevationEdge in the
+        graph.
+
+        NOTE: if this is set to true for graph building, make sure to not set the value of
+        `RoutingResource#geoidElevation` to true otherwise OTP will add this geoid value again to
+        all of the elevation values in the street edges.
+        """
+      )
+      .asBoolean(false);
+
+    this.islandPruning = IslandPruningConfig.fromConfig(root);
+
+    this.maxDataImportIssuesPerFile = root
+      .of("maxDataImportIssuesPerFile")
+      .since(V2_0)
+      .summary("When to split the import report.")
+      .description(
+        """
+          If the number of issues is larger then `maxDataImportIssuesPerFile`, then the files will
+          be split in multiple files. Since browsers have problems opening large HTML files.
+        """
+      )
+      .asInt(1000);
+
+    this.regularTransferParameters = RegularTransferConfig.map(root);
+
+    this.maxStopToShapeSnapDistance = root
+      .of("maxStopToShapeSnapDistance")
+      .since(V2_1)
+      .summary("Maximum distance between route shapes and their stops.")
+      .description(
+        """
+        This field is used for mapping routes geometry shapes. It determines max distance between shape
+        points and their stop sequence. If mapper cannot find any stops within this radius it will
+        default to simple stop-to-stop geometry instead.
+        """
+      )
+      .asDouble(150);
+    this.multiThreadElevationCalculations = root
+      .of("multiThreadElevationCalculations")
+      .since(V2_0)
+      .summary("Configuring multi-threading during elevation calculations.")
+      .description(
+        """
+          For unknown reasons that seem to depend on data and machine settings, it might be faster
+          to use a single processor. If multi-threading is activated, parallel streams will be used
+          to calculate the elevations.
+        """
+      )
+      .asBoolean(false);
+    this.elevationTileCacheSizeMB = root
+      .of("elevationTileCacheSizeMB")
+      .since(V2_10)
+      .summary(
+        "Memory budget in megabytes for the Imagen tile cache used during elevation processing."
+      )
+      .description(
+        """
+        Elevation sampling reads pixels from a tiled DEM through Imagen's tile cache. Sizing the
+        cache to fit the DEM working set turns repeated tile decompressions into cache hits.
+        Increase for large DEMs, lower for memory-constrained environments. The cache lives
+        inside the JVM heap and must fit inside `-Xmx`.
+        """
+      )
+      .asInt(100);
+    this.osmCacheDataInMem = root
+      .of("osmCacheDataInMem")
+      .since(V2_0)
+      .summary("If OSM data should be cached in memory during processing.")
+      .description(
+        """
+        When loading OSM data, the input is streamed 3 times - one phase for processing RELATIONS, one
+        for WAYS and last one for NODES. Instead of reading the data source 3 times it might be faster
+        to cache the entire osm file im memory. The trade off is of course that OTP might use more
+        memory while loading osm data. You can use this parameter to choose what is best for your
+        deployment depending on your infrastructure. Set the parameter to `true` to cache the
+        data, and to `false` to read the stream from the source each time.
+        """
+      )
+      .asBoolean(false);
+    this.platformEntriesLinking = root
+      .of("platformEntriesLinking")
+      .since(V2_0)
+      .summary(
+        "Link stairways, elevators and other entries that fall inside a platform's outline into that platform's walking area."
+      )
+      .description(
+        """
+        Public transport platforms in OSM are usually mapped as an area, but the stairway,
+        elevator or ramp that actually leads onto the platform is frequently mapped as a separate
+        way whose nodes are not shared with the platform's outline - it merely happens to end
+        somewhere geometrically inside of it. Without this option such entries stay disconnected from
+        the platform and can end up unreachable, or force a long detour around the platform
+        boundary to reach.
+
+        When enabled, OTP looks for street vertices that have exactly one non-motorized
+        connection to the rest of the street network - a "stub", such as the top of a staircase.
+        For every platform, it then checks which of these stubs fall inside that platform's
+        outline - not just on its boundary, but anywhere inside it - and links them into the
+        platform's walking area, so people can be routed from the platform to the entrance and
+        back even though OSM never connected them directly.
+
+        Turn this on if platform entrances in your OSM data are commonly mapped this way; leave
+        it off if entrances always share nodes with the platform outline, since the extra
+        street-vertex scan adds a small amount of processing time during graph build.
+        """
+      )
+      .asBoolean(false);
+    this.staticParkAndRide = root
+      .of("staticParkAndRide")
+      .since(V1_5)
+      .summary("Whether we should create car P+R stations from OSM data.")
+      .asBoolean(true);
+    this.staticBikeParkAndRide = root
+      .of("staticBikeParkAndRide")
+      .since(V1_5)
+      .summary("Whether we should create bike P+R stations from OSM data.")
+      .asBoolean(false);
+    this.includeInclinedEdgeLevelInfo = root
+      .of("includeInclinedEdgeLevelInfo")
+      .since(V2_9)
+      .summary(
+        "Whether level info for inclined edges should be stored in the graph for use during runtime."
+      )
+      .asBoolean(false);
+    this.subwayAccessTime = root
+      .of("subwayAccessTime")
+      .since(V1_5)
+      .summary(
+        "Minutes necessary to reach stops served by trips on routes of route_type=1 (subway) from the street."
+      )
+      .description(
+        """
+        Note! The preferred way to do this is to update the OSM data.
+        See [In-station navigation](In-Station-Navigation.md).
+
+        The ride locations for some modes of transport such as subways can be slow to reach from the street.
+        When planning a trip, we need to allow additional time to reach these locations to properly inform
+        the passenger. For example, this helps avoid suggesting short bus rides between two subway rides as
+        a way to improve travel time. You can specify how long it takes to reach a subway platform.
+
+        This setting does not generalize to other modes like airplanes because you often need much longer time
+        to check in to a flight (2-3 hours for international flights) than to alight and exit the airport
+        (perhaps 1 hour). Use [`boardSlackForMode`](RouteRequest.md#rd_boardSlackForMode) and
+        [`alightSlackForMode`](RouteRequest.md#rd_alightSlackForMode) for this.
+        """
+      )
+      .asDouble(DEFAULT_SUBWAY_ACCESS_TIME_MINUTES);
+
+    // Time Zone dependent config
+    {
+      // We need a time zone for setting transit service start and end. Getting the wrong time-zone
+      // will just shift the period with one day, so the consequences is limited.
+      this.transitModelTimeZone = root
+        .of("transitModelTimeZone")
+        .since(V2_2)
+        .summary("Time zone for the graph.")
+        .description(
+          "This is used to store the timetables in the transit model, and to interpret times in incoming requests."
+        )
+        .asZoneId(null);
+      var confZone = ObjectUtils.ifNotNull(transitModelTimeZone, ZoneId.systemDefault());
+      this.transitServiceStart = root
+        .of("transitServiceStart")
+        .since(V2_0)
+        .summary("Limit the import of transit services to the given START date.")
+        .description(
+          """
+          See [Limit the transit service period](#limit-transit-service-period) for an introduction.
+
+          The date is inclusive. If set, any transit service on a day BEFORE the given date is dropped and
+          will not be part of the graph. Use an absolute date or a period relative to the date the graph is
+          build(BUILD_DAY).
+
+          To get an effectively unbounded value, use a very large period like `"-P100Y"`.
+          """
+        )
+        .asDateOrRelativePeriod("-P1Y", confZone);
+      this.transitServiceEnd = root
+        .of("transitServiceEnd")
+        .since(V2_0)
+        .summary("Limit the import of transit services to the given end date.")
+        .description(
+          """
+          See [Limit the transit service period](#limit-transit-service-period) for an introduction.
+
+          The date is inclusive. If set, any transit service on a day AFTER the given date is dropped and
+          will not be part of the graph. Use an absolute date or a period relative to the date the graph is
+          build(BUILD_DAY).
+
+          To get an effectively unbounded value, use a very large period like `"P100Y"`.
+          """
+        )
+        .asDateOrRelativePeriod("P3Y", confZone);
+    }
+
+    this.transitRouteToStationCentroid = root
+      .of("transitRouteToStationCentroid")
+      .since(V2_7)
+      .summary("List stations that should route to centroid.")
+      .description(
+        """
+        This field contains a list of station ids for which street legs will start/end at the station
+        centroid instead of the child stops.
+
+        When searching from/to a station the default behaviour is to route from/to any of the stations child
+        stops. This can cause strange results for stations that have stops spread over a large area.
+
+        For some stations you might instead wish to use the centroid of the station as the
+        origin/destination. In this case the centroid will be used both for direct street search and for
+        access/egress street search where the station is used as the start/end of the access/egress. But
+        transit that starts/ends at the station will work as usual without any additional street leg from/to
+        the centroid.
+        """
+      )
+      .asFeedScopedIds(List.of());
+
+    this.maxAreaNodes = root
+      .of("maxAreaNodes")
+      .since(V2_1)
+      .summary(
+        "Visibility calculations for an area will not be done if there are more nodes than this limit."
+      )
+      .asInt(StreetConstants.DEFAULT_MAX_AREA_NODES);
+    this.maxElevationPropagationMeters = root
+      .of("maxElevationPropagationMeters")
+      .since(V1_5)
+      .summary("The maximum distance to propagate elevation to vertices which have no elevation.")
+      .asInt(2000);
+    this.boardingLocationTags = root
+      .of("boardingLocationTags")
+      .since(V2_2)
+      .summary(
+        "What OSM tags should be looked on for the source of matching stops to platforms and stops."
+      )
+      .description("[Detailed documentation](BoardingLocations.md)")
+      .asStringSet(List.copyOf(Set.of("ref")));
+    elevatorRefTags = root
+      .of("elevatorRefTags")
+      .since(V2_10)
+      .summary("Groups of OSM tags whose values are combined into an elevator id.")
+      .description(
+        """
+        Each group is a list of one or more OSM tag keys. If every tag in a group is present
+        on an elevator node/way, their values are joined with ':' (in the given order) into
+        one id. A group with a single tag key produces a plain id. If any tag in a group is
+        missing, that group produces no id. If more than one group is configured, the first
+        one (in the given order) that produces an id is used as the elevator's id."""
+      )
+      .asObjects(List.of(), node ->
+        CompoundRefTagGroup.of(
+          node
+            .of("tagGroup")
+            .since(V2_10)
+            .summary("The ordered OSM tag keys whose values are combined into one id.")
+            .asStringList(List.of())
+            .toArray(String[]::new)
+        )
+      );
+
+    var localFileNamePatternsConfig = root
+      .of("localFileNamePatterns")
+      .since(V2_0)
+      .summary("Patterns for matching OTP file types in the base directory")
+      .description(
+        """
+        When scanning the base directory for inputs, each file's name is checked against patterns to
+        detect what kind of file it is.
+
+        OTP1 used to peek inside ZIP files and read the CSV tables to guess if a ZIP was indeed GTFS. Now
+        that we support remote input files (cloud storage or arbitrary URLs) not all data sources allow
+        seeking within files to guess what they are. Therefore, like all other file types GTFS is now
+        detected from a filename pattern. It is not sufficient to look for the `.zip` extension because
+        Netex data is also often supplied in a ZIP file.
+        """
+      )
+      .asObject();
+    this.gtfsLocalFilePattern = localFileNamePatternsConfig
+      .of("gtfs")
+      .since(V2_0)
+      .summary("Patterns for matching GTFS zip-files or directories.")
+      .description(
+        """
+        If the filename contains the given pattern it is considered a match.
+        Any legal Java Regular expression is allowed.
+        """
+      )
+      .asPattern(DEFAULT_GTFS_PATTERN);
+    this.netexLocalFilePattern = localFileNamePatternsConfig
+      .of("netex")
+      .since(V2_0)
+      .summary("Patterns for matching NeTEx zip files or directories.")
+      .description(
+        """
+        If the filename contains the given
+        pattern it is considered a match. Any legal Java Regular expression is allowed.
+        """
+      )
+      .asPattern(DEFAULT_NETEX_PATTERN);
+    this.osmLocalFilePattern = localFileNamePatternsConfig
+      .of("osm")
+      .since(V2_0)
+      .summary("Pattern for matching Open Street Map input files.")
+      .description(
+        """
+        If the filename contains the given pattern
+        it is considered a match. Any legal Java Regular expression is allowed.
+        """
+      )
+      .asPattern(DEFAULT_OSM_PATTERN);
+    this.demLocalFilePattern = localFileNamePatternsConfig
+      .of("dem")
+      .since(V2_0)
+      .summary("Pattern for matching elevation DEM files.")
+      .description(
+        """
+        If the filename contains the given pattern it is
+        considered a match. Any legal Java Regular expression is allowed.
+        """
+      )
+      .asPattern(DEFAULT_DEM_PATTERN);
+
+    this.graph = root
+      .of("graph")
+      .since(V2_0)
+      .summary("URI to the graph object file for reading and writing.")
+      .description("The file is created or overwritten if OTP saves the graph to the file.")
+      .asUri(null);
+    this.streetGraph = root
+      .of("streetGraph")
+      .since(V2_0)
+      .summary("URI to the street graph object file for reading and writing.")
+      .description("The file is created or overwritten if OTP saves the graph to the file")
+      .asUri(null);
+    this.buildReportDir = root
+      .of("buildReportDir")
+      .since(V2_0)
+      .summary("URI to the directory where the graph build report should be written to.")
+      .description(
+        """
+        The html report is written into this directory. If the directory exist, any existing files are deleted.
+        If it does not exist, it is created.
+        """
+      )
+      .asUri(null);
+
+    this.stopConsolidation = root
+      .of("stopConsolidationFile")
+      .since(V2_5)
+      .summary(
+        "Name of the CSV-formatted file in the build directory which contains the configuration for stop consolidation."
+      )
+      .asUri(null);
+
+    this.osmDefaults = OsmConfig.mapOsmDefaults(root, "osmDefaults");
+    this.osm = OsmConfig.mapOsmConfig(root, "osm", osmDefaults);
+    this.demDefaults = DemConfig.mapDemDefaultsConfig(root, "demDefaults");
+    this.dem = DemConfig.mapDemConfig(root, "dem", demDefaults);
+    this.emission = EmissionConfig.mapEmissionsConfig("emission", root);
+    this.empiricalDelay = EmpiricalDelayConfig.mapEmpiricalDelayConfig("empiricalDelay", root);
+    this.vehicleRentalGeofencing = VehicleRentalGeofencingConfig.mapConfig(
+      "vehicleRentalGeofencing",
+      root
+    );
+    this.netexDefaults = NetexConfig.mapNetexDefaultParameters(root, "netexDefaults");
+    this.gtfsDefaults = GtfsConfig.mapGtfsDefaultParameters(root, "gtfsDefaults");
+    this.transitFeeds = TransitFeedConfig.mapTransitFeeds(
+      root,
+      "transitFeeds",
+      netexDefaults,
+      gtfsDefaults
+    );
+
+    // List of complex parameters
+    this.fareConfig = FaresConfiguration.fromConfig(root, "fares");
+    this.edgeNamer = EdgeNamerFactory.fromConfig(root, "osmNaming");
+    this.dataOverlay = DataOverlayConfigMapper.map(root, "dataOverlay");
+
+    this.gsConfig = GsConfig.fromConfig(root, "gsConfig");
+
+    if (logUnusedParams && LOG.isWarnEnabled()) {
+      root.logAllWarnings(LOG::warn);
+    }
+  }
+
+  @Override
+  public URI reportDirectory() {
+    return buildReportDir;
+  }
+
+  @Override
+  public GsConfig gsParameters() {
+    return gsConfig;
+  }
+
+  public GraphBuildCacheParameters cache() {
+    return cache.toParameters();
+  }
+
+  /**
+   * Create a URI for a resource within the configured cache directory.
+   */
+  public URI cachePath(String resourceName) {
+    return cache.path(resourceName);
+  }
+
+  @Override
+  public List<URI> osmFiles() {
+    return osm.osmFiles();
+  }
+
+  @Override
+  public List<URI> demFiles() {
+    return dem.demFiles();
+  }
+
+  @Override
+  public List<URI> gtfsFiles() {
+    return transitFeeds.gtfsFiles();
+  }
+
+  @Override
+  public List<URI> netexFiles() {
+    return transitFeeds.netexFiles();
+  }
+
+  @Override
+  public List<URI> emissionFiles() {
+    return emission.emissionFiles();
+  }
+
+  @Override
+  public List<URI> empiricalDelayFiles() {
+    return empiricalDelay.listFiles();
+  }
+
+  @Override
+  public URI graph() {
+    return graph;
+  }
+
+  @Override
+  public URI streetGraph() {
+    return streetGraph;
+  }
+
+  @Override
+  @Nullable
+  public URI stopConsolidation() {
+    return stopConsolidation;
+  }
+
+  @Override
+  @Nullable
+  public List<URI> cacheFiles() {
+    return cache.files();
+  }
+
+  @Override
+  public Pattern gtfsLocalFilePattern() {
+    return gtfsLocalFilePattern;
+  }
+
+  @Override
+  public Pattern netexLocalFilePattern() {
+    return netexLocalFilePattern;
+  }
+
+  @Override
+  public Pattern osmLocalFilePattern() {
+    return osmLocalFilePattern;
+  }
+
+  @Override
+  public Pattern demLocalFilePattern() {
+    return demLocalFilePattern;
+  }
+
+  /**
+   * If {@code true} the config is loaded from file, in not the DEFAULT config is used.
+   */
+  public boolean isDefault() {
+    return root.isEmpty();
+  }
+
+  public String toJson() {
+    return root.isEmpty() ? "" : root.toJson();
+  }
+
+  public LocalDateRange getTransitServicePeriod() {
+    return LocalDateRange.ofInclusiveEnd(transitServiceStart, transitServiceEnd);
+  }
+
+  public List<FeedScopedId> transitRouteToStationCentroid() {
+    return transitRouteToStationCentroid;
+  }
+
+  public RegularTransferParameters regularTransferParameters() {
+    return regularTransferParameters;
+  }
+
+  public int getSubwayAccessTimeSeconds() {
+    // Convert access time in minutes to seconds
+    return (int) (subwayAccessTime * 60.0);
+  }
+
+  public NodeAdapter asNodeAdapter() {
+    return root;
+  }
+
+  /**
+   * Checks if any unknown or invalid parameters were encountered while loading the configuration.
+   */
+  public boolean hasUnknownParameters() {
+    return root.hasUnknownParameters();
+  }
+}

@@ -1,0 +1,152 @@
+package org.opentripplanner.updater.trip.gtfs.moduletests.delay;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.opentripplanner.updater.spi.UpdateResultAssertions.assertSuccess;
+
+import org.junit.jupiter.api.Test;
+import org.opentripplanner.transit.model.TransitTestEnvironment;
+import org.opentripplanner.transit.model.TransitTestEnvironmentBuilder;
+import org.opentripplanner.transit.model.TripInput;
+import org.opentripplanner.transit.model.site.RegularStop;
+import org.opentripplanner.updater.trip.RealtimeTestConstants;
+import org.opentripplanner.updater.trip.gtfs.GtfsRtTestHelper;
+
+/**
+ * Delays should be applied to the first trip but should leave the second trip untouched.
+ */
+class DelayedTest implements RealtimeTestConstants {
+
+  private final TransitTestEnvironmentBuilder ENV_BUILDER = TransitTestEnvironment.of();
+  private final RegularStop STOP_A = ENV_BUILDER.stop(STOP_A_ID);
+  private final RegularStop STOP_B = ENV_BUILDER.stop(STOP_B_ID);
+  private final RegularStop STOP_C = ENV_BUILDER.stop(STOP_C_ID);
+
+  private static final int DELAY = 1;
+  private static final int STOP_SEQUENCE = 1;
+
+  @Test
+  void singleStopSequence() {
+    var tripInput = TripInput.of(TRIP_1_ID)
+      .addStop(STOP_A, "0:00:10", "0:00:11")
+      .addStop(STOP_B, "0:00:20", "0:00:21");
+    var env = ENV_BUILDER.addTrip(tripInput).build();
+    var rt = GtfsRtTestHelper.of(env);
+
+    var tripUpdate = rt
+      .tripUpdateScheduled(TRIP_1_ID)
+      .addDelayedStopTime(STOP_SEQUENCE, DELAY)
+      .build();
+
+    var result = rt.applyTripUpdate(tripUpdate);
+
+    assertSuccess(result);
+
+    var tripData = env.tripData(TRIP_1_ID);
+
+    var trip1Realtime = tripData.tripTimes();
+    var trip1Scheduled = tripData.scheduledTripTimes();
+
+    assertNotSame(trip1Realtime, trip1Scheduled);
+    assertEquals(DELAY, trip1Realtime.getArrivalDelay(STOP_SEQUENCE));
+    assertEquals(DELAY, trip1Realtime.getDepartureDelay(STOP_SEQUENCE));
+
+    assertFalse(trip1Scheduled.hasAnyUpdates());
+
+    assertEquals(
+      "S | A 0:00:10 0:00:11 | B 0:00:20 0:00:21",
+      env.tripData(TRIP_1_ID).showScheduledTimetable()
+    );
+    assertEquals(
+      "U | A [ND] 0:00:10 0:00:11 | B 0:00:21 0:00:22",
+      env.tripData(TRIP_1_ID).showTimetable()
+    );
+  }
+
+  @Test
+  void stopIds() {
+    var tripInput = TripInput.of(TRIP_1_ID)
+      .addStop(STOP_A, "10:00", "10:00")
+      .addStop(STOP_B, "10:10", "10:10");
+
+    var env = ENV_BUILDER.addTrip(tripInput).build();
+    var rt = GtfsRtTestHelper.of(env);
+
+    var tripUpdate = rt
+      .tripUpdateScheduled(TRIP_1_ID)
+      .addStopTime(STOP_A_ID, "10:01")
+      .addStopTime(STOP_B_ID, "10:11")
+      .build();
+
+    assertSuccess(rt.applyTripUpdate(tripUpdate));
+
+    assertEquals("U | A 10:01 10:01 | B 10:11 10:11", env.tripData(TRIP_1_ID).showTimetable());
+  }
+
+  @Test
+  void singleStopId() {
+    var tripInput = TripInput.of(TRIP_1_ID)
+      .addStop(STOP_A, "10:00", "10:00")
+      .addStop(STOP_B, "10:10", "10:10");
+
+    var env = ENV_BUILDER.addTrip(tripInput).build();
+    var rt = GtfsRtTestHelper.of(env);
+
+    var tripUpdate = rt.tripUpdateScheduled(TRIP_1_ID).addStopTime(STOP_B_ID, "10:11").build();
+
+    assertSuccess(rt.applyTripUpdate(tripUpdate));
+
+    assertEquals("U | A [ND] 10:00 10:00 | B 10:11 10:11", env.tripData(TRIP_1_ID).showTimetable());
+  }
+
+  /**
+   * Tests delays to multiple stop times, where arrival and departure do not have the same delay.
+   */
+  @Test
+  void complexDelay() {
+    var tripInput = TripInput.of(TRIP_2_ID)
+      .addStop(STOP_A, "0:01:00", "0:01:01")
+      .addStop(STOP_B, "0:01:10", "0:01:11")
+      .addStop(STOP_C, "0:01:20", "0:01:21");
+    var env = ENV_BUILDER.addTrip(tripInput).build();
+    var rt = GtfsRtTestHelper.of(env);
+
+    var tripUpdate = rt
+      .tripUpdateScheduled(TRIP_2_ID)
+      .addDelayedStopTime(0, 0)
+      .addDelayedStopTime(1, 60, 80)
+      .addDelayedStopTime(2, 90, 90)
+      .build();
+
+    assertSuccess(rt.applyTripUpdate(tripUpdate));
+
+    var tripData = env.tripData(TRIP_2_ID);
+    var realtimeTripTimes = tripData.tripTimes();
+    var scheduledTripTimes = tripData.scheduledTripTimes();
+
+    assertNotSame(realtimeTripTimes, scheduledTripTimes);
+
+    assertNotNull(scheduledTripTimes, "Original trip should be found in scheduled time table");
+    assertFalse(
+      scheduledTripTimes.isCanceledOrDeleted(),
+      "Original trip times should not be canceled in scheduled time table"
+    );
+    assertFalse(scheduledTripTimes.hasAnyUpdates());
+
+    assertNotNull(
+      realtimeTripTimes,
+      "Original trip should be found in time table for service date"
+    );
+
+    assertEquals(
+      "S | A 0:01 0:01:01 | B 0:01:10 0:01:11 | C 0:01:20 0:01:21",
+      tripData.showScheduledTimetable()
+    );
+    assertEquals(
+      "U | A 0:01 0:01:01 | B 0:02:10 0:02:31 | C 0:02:50 0:02:51",
+      tripData.showTimetable()
+    );
+  }
+}

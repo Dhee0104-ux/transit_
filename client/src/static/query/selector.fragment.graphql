@@ -1,0 +1,95 @@
+{
+    previousPageCursor
+    nextPageCursor
+    tripPatterns {
+        aimedStartTime
+        aimedEndTime
+        expectedEndTime
+        expectedStartTime
+        duration
+        distance
+        generalizedCost
+        legs {
+            id
+            mode
+            aimedStartTime
+            aimedEndTime
+            expectedEndTime
+            expectedStartTime
+            realtime
+            distance
+            duration
+            generalizedCost
+            fromPlace {
+                name
+                latitude
+                longitude
+                quay {
+                    id
+                }
+                rentalVehicle {
+                    id
+                    network
+                    vehicleType {
+                        formFactor
+                        propulsionType
+                    }
+                }
+                bikeRentalStation {
+                    id
+                    name
+                    networks
+                }
+            }
+            toPlace {
+                name
+                latitude
+                longitude
+                quay {
+                    id
+                }
+                rentalVehicle {
+                    id
+                    network
+                    vehicleType {
+                        formFactor
+                        propulsionType
+                    }
+                }
+                bikeRentalStation {
+                    id
+                    name
+                    networks
+                }
+            }
+            fromEstimatedCall {
+                destinationDisplay {
+                    frontText
+                }
+            }
+            line {
+                publicCode
+                name
+                id
+                presentation {
+                    colour
+                }
+            }
+            authority {
+                name
+                id
+            }
+            pointsOnLink {
+                points
+            }
+            interchangeTo {
+                staySeated
+            }
+            interchangeFrom {
+                staySeated
+            }
+        }
+        systemNotices {
+            tag
+        }
+    }

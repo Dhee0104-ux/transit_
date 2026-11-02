@@ -1,0 +1,5 @@
+{
+  "transitServiceStart": "2026-09-01",
+  "transitServiceEnd": "2027-09-01",
+  "maxStopToShapeSnapDistance": 500.0
+}

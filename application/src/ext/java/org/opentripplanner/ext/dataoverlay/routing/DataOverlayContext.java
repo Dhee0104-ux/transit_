@@ -1,0 +1,87 @@
+package org.opentripplanner.ext.dataoverlay.routing;
+
+import static org.opentripplanner.ext.dataoverlay.api.DataOverlayParameters.toStringKey;
+import static org.opentripplanner.ext.dataoverlay.api.ParameterType.PENALTY;
+import static org.opentripplanner.ext.dataoverlay.api.ParameterType.THRESHOLD;
+
+import java.util.ArrayList;
+import java.util.List;
+import javax.annotation.Nullable;
+import org.opentripplanner.ext.dataoverlay.api.DataOverlayParameters;
+import org.opentripplanner.ext.dataoverlay.api.ParameterName;
+import org.opentripplanner.ext.dataoverlay.api.ParameterType;
+import org.opentripplanner.ext.dataoverlay.configuration.DataOverlayParameterBindings;
+import org.opentripplanner.framework.application.OTPFeature;
+import org.opentripplanner.street.model.edge.ExtensionRequestContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class DataOverlayContext implements ExtensionRequestContext {
+
+  private static final Logger LOG = LoggerFactory.getLogger(DataOverlayContext.class);
+
+  private final List<Parameter> parameters = new ArrayList<>();
+
+  public DataOverlayContext(
+    DataOverlayParameterBindings parameterBindings,
+    DataOverlayParameters requestParameters
+  ) {
+    for (ParameterName paramName : requestParameters.listParameterNames()) {
+      addParameter(paramName, parameterBindings, requestParameters);
+    }
+  }
+
+  /**
+   * Builds the {@link ExtensionRequestContext} list for a request, given the app-singleton
+   * {@link DataOverlayParameterBindings}.
+   */
+  public static List<ExtensionRequestContext> listExtensionRequestContexts(
+    DataOverlayParameters dataOverlayRequest,
+    @Nullable DataOverlayParameterBindings dataOverlayParameterBindings
+  ) {
+    if (OTPFeature.DataOverlay.isOn() && dataOverlayParameterBindings != null) {
+      return List.of(new DataOverlayContext(dataOverlayParameterBindings, dataOverlayRequest));
+    }
+    return List.of();
+  }
+
+  public Iterable<? extends Parameter> getParameters() {
+    return parameters;
+  }
+
+  private void addParameter(
+    ParameterName paramName,
+    DataOverlayParameterBindings parameterBindings,
+    DataOverlayParameters requestParameters
+  ) {
+    var penalty = requestParameters.get(paramName, PENALTY);
+
+    if (isParameterValueInvalid(penalty, paramName, PENALTY)) {
+      return;
+    }
+
+    var threshold = requestParameters.get(paramName, THRESHOLD);
+
+    if (isParameterValueInvalid(threshold, paramName, THRESHOLD)) {
+      return;
+    }
+
+    var binding = parameterBindings.getParameterBinding(paramName);
+
+    if (binding.isEmpty()) {
+      LOG.warn("Request parameter config not found. Parameter: {}", paramName);
+      return;
+    }
+
+    this.parameters.add(new Parameter(binding.get(), threshold, penalty));
+  }
+
+  private boolean isParameterValueInvalid(Double value, ParameterName name, ParameterType type) {
+    if (value == null || value < 0d) {
+      LOG.warn("Request parameter required. Parameter: {}", toStringKey(name, type));
+      return true;
+    } else {
+      return false;
+    }
+  }
+}

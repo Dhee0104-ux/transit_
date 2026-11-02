@@ -1,0 +1,709 @@
+package org.opentripplanner.updater.trip.siri;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.opentripplanner.core.model.id.FeedScopedIdForTestFactory.id;
+import static org.opentripplanner.updater.spi.UpdateResultAssertions.assertFailure;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.model.PickDrop;
+import org.opentripplanner.model.calendar.CalendarServiceData;
+import org.opentripplanner.routing.algorithm.raptoradapter.transit.RaptorTransitDataTestFactory;
+import org.opentripplanner.transit.model._data.TransitRepositoryForTest;
+import org.opentripplanner.transit.model.basic.SubMode;
+import org.opentripplanner.transit.model.basic.TransitMode;
+import org.opentripplanner.transit.model.framework.AbstractTransitEntity;
+import org.opentripplanner.transit.model.framework.Deduplicator;
+import org.opentripplanner.transit.model.network.Route;
+import org.opentripplanner.transit.model.network.TripPattern;
+import org.opentripplanner.transit.model.organization.Agency;
+import org.opentripplanner.transit.model.organization.Operator;
+import org.opentripplanner.transit.model.site.RegularStop;
+import org.opentripplanner.transit.model.timetable.RealTimeTripTimes;
+import org.opentripplanner.transit.model.timetable.Trip;
+import org.opentripplanner.transit.model.timetable.TripOnServiceDate;
+import org.opentripplanner.transit.repository.DefaultTimetableRepository;
+import org.opentripplanner.transit.service.DefaultTransitService;
+import org.opentripplanner.transit.service.SiteRepository;
+import org.opentripplanner.transit.service.TransitRepository;
+import org.opentripplanner.transit.service.TransitService;
+import org.opentripplanner.updater.alert.siri.mapping.SiriTransportModeMapper;
+import org.opentripplanner.updater.spi.UpdateErrorType;
+import uk.org.siri.siri21.VehicleModesEnumeration;
+
+class AddedTripBuilderTest {
+
+  private static final Agency AGENCY = TransitRepositoryForTest.AGENCY;
+  private static final ZoneId TIME_ZONE = AGENCY.getTimezone();
+  private static final Operator OPERATOR = Operator.of(id("OPERATOR_ID"))
+    .withName("OPERATOR_NAME")
+    .build();
+  private static final Route REPLACED_ROUTE = TransitRepositoryForTest.route("REPLACED_ROUTE")
+    .withAgency(AGENCY)
+    .withOperator(OPERATOR)
+    .build();
+  private static final String LINE_REF = "ROUTE_ID";
+  private static final FeedScopedId TRIP_ID = id("TRIP_ID");
+  private static final FeedScopedId DATED_SERVICE_JOURNEY_ID = id("DATED_SERVICE_JOURNEY_ID");
+  private static final LocalDate SERVICE_DATE = LocalDate.of(2023, 2, 17);
+  private static final TransitMode TRANSIT_MODE = TransitMode.RAIL;
+  private static final String SUB_MODE = "replacementRailService";
+  private static final String SHORT_NAME = "Hogwarts Express";
+  private static final String HEADSIGN = "TEST TRIP TOWARDS TEST ISLAND";
+
+  /* Transit model */
+  private static final TransitRepositoryForTest MODEL_TEST = TransitRepositoryForTest.of();
+
+  private static final RegularStop STOP_A = MODEL_TEST.stop("A").build();
+  private static final RegularStop STOP_B = MODEL_TEST.stop("B").build();
+  private static final RegularStop STOP_C = MODEL_TEST.stop("C").build();
+  private static final RegularStop STOP_D = MODEL_TEST.stop("D").build();
+  private final SiteRepository SITE_REPOSITORY = MODEL_TEST.siteRepositoryBuilder()
+    .withRegularStop(STOP_A)
+    .withRegularStop(STOP_B)
+    .withRegularStop(STOP_C)
+    .withRegularStop(STOP_D)
+    .build();
+
+  private final Deduplicator DEDUPLICATOR = new Deduplicator();
+  private final TransitRepository TRANSIT_MODEL = new TransitRepository(SITE_REPOSITORY);
+  private TransitService transitService;
+  private EntityResolver ENTITY_RESOLVER;
+  private DefaultTimetableRepository timetableRepository;
+
+  @BeforeEach
+  void setUp() {
+    // Add entities to transit model for the entity resolver
+    TRANSIT_MODEL.addAgency(AGENCY);
+    final TripPattern pattern = TransitRepositoryForTest.tripPattern(
+      "REPLACED_ROUTE_PATTERN_ID",
+      REPLACED_ROUTE
+    )
+      .withStopPattern(TransitRepositoryForTest.stopPattern(STOP_A, STOP_B))
+      .build();
+    TRANSIT_MODEL.addTripPattern(pattern.getId(), pattern);
+
+    // Crate a scheduled calendar, to have the SERVICE_DATE be within the transit feed coverage
+    CalendarServiceData calendarServiceData = new CalendarServiceData();
+    var cal_id = id("CAL_1");
+    calendarServiceData.putServiceDatesForServiceId(
+      cal_id,
+      List.of(SERVICE_DATE.minusDays(1), SERVICE_DATE, SERVICE_DATE.plusDays(1))
+    );
+    TRANSIT_MODEL.putServiceCode(cal_id, 0);
+    TRANSIT_MODEL.updateCalendarServiceData(calendarServiceData);
+
+    // Create transit model index
+    TRANSIT_MODEL.index();
+    timetableRepository = new DefaultTimetableRepository(
+      RaptorTransitDataTestFactory.empty(),
+      TRANSIT_MODEL.getTripCalendar()
+    );
+    transitService = new DefaultTransitService(TRANSIT_MODEL, timetableRepository);
+
+    // Create the entity resolver only after the model has been indexed
+    ENTITY_RESOLVER = new EntityResolver(
+      new DefaultTransitService(TRANSIT_MODEL, timetableRepository),
+      TransitRepositoryForTest.FEED_ID
+    );
+  }
+
+  @Test
+  void testAddedTrip() {
+    var tripUpdate = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      getCalls(10),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    ).build();
+
+    // Assert trip
+    Trip trip = tripUpdate.tripTimes().getTrip();
+    assertEquals(TRIP_ID, trip.getId(), "Trip should be mapped");
+    assertEquals(OPERATOR, trip.getOperator(), "operator should be mapped");
+    assertEquals(TRANSIT_MODE, trip.getMode(), "transitMode should be mapped");
+    assertEquals(SubMode.of(SUB_MODE), trip.getNetexSubMode(), "submode should be mapped");
+    assertNotNull(trip.getHeadsign(), "Headsign should be mapped");
+    assertEquals(HEADSIGN, trip.getHeadsign().toString(), "Headsign should be mapped");
+    assertEquals(SERVICE_DATE, tripUpdate.serviceDate());
+
+    // Assert route
+    Route route = trip.getRoute();
+    assertEquals(LINE_REF, route.getId().getId(), "route should be mapped");
+    assertEquals(AGENCY, route.getAgency(), "Agency should be taken from replaced route");
+    assertEquals(SHORT_NAME, route.getShortName());
+    assertEquals(TRANSIT_MODE, route.getMode(), "transitMode should be mapped");
+    assertEquals(SubMode.of(SUB_MODE), route.getNetexSubmode(), "submode should be mapped");
+    assertNotEquals(REPLACED_ROUTE, route, "Should not re-use replaced route");
+
+    assertTrue(tripUpdate.routeCreation(), "The route is marked as created by real time updater");
+
+    assertTrue(tripUpdate.tripCreation(), "The trip is marked as created by real time updater");
+
+    TripPattern pattern = tripUpdate.addedTripPattern();
+    assertNotNull(pattern);
+    assertEquals(route, pattern.getRoute());
+    assertTrue(
+      transitService
+        .getServiceCodesRunningForDate(SERVICE_DATE)
+        .contains(timetableRepository.getTripCalendars().getServiceCode(trip.getServiceId())),
+      "serviceId should be running on service date"
+    );
+    TripOnServiceDate tripOnServiceDate = tripUpdate.addedTripOnServiceDate();
+    assertNotNull(tripOnServiceDate, "The TripUpdate should contain a new TripOnServiceDate");
+    assertTrue(tripOnServiceDate.isExtraJourney(), "The trip should be marked as extra journey");
+
+    // Assert stop pattern
+    var stopPattern = tripUpdate.stopPattern();
+    assertEquals(stopPattern, pattern.getStopPattern());
+    assertEquals(3, stopPattern.getSize());
+    assertEquals(STOP_A, stopPattern.getStop(0));
+    assertEquals(STOP_B, stopPattern.getStop(1));
+    assertEquals(STOP_C, stopPattern.getStop(2));
+
+    // Assert pickup/dropoff defaults: no alighting at first stop, no boarding at last stop
+    assertEquals(PickDrop.SCHEDULED, pattern.getBoardType(0), "Can board at first stop");
+    assertEquals(PickDrop.NONE, pattern.getAlightType(0), "Cannot alight at first stop");
+    assertEquals(PickDrop.SCHEDULED, pattern.getBoardType(1), "Can board at middle stop");
+    assertEquals(PickDrop.SCHEDULED, pattern.getAlightType(1), "Can alight at middle stop");
+    assertEquals(PickDrop.NONE, pattern.getBoardType(2), "Cannot board at last stop");
+    assertEquals(PickDrop.SCHEDULED, pattern.getAlightType(2), "Can alight at last stop");
+
+    // Assert scheduled timetable
+    var scheduledTimes = pattern.getScheduledTimetable().getTripTimes(trip);
+    assertNotNull(scheduledTimes);
+    // TODO - is this correct?
+    assertFalse(scheduledTimes.hasAnyUpdates());
+    assertEquals(secondsInDay(10, 20), scheduledTimes.getArrivalTime(0));
+    assertEquals(secondsInDay(10, 20), scheduledTimes.getDepartureTime(0));
+    assertEquals(0, scheduledTimes.getDepartureDelay(0));
+    assertEquals(HEADSIGN, scheduledTimes.getHeadsign(0).toString());
+    assertFalse(scheduledTimes.hasArrived(0), "Scheduled timetable should not have arrived");
+    assertFalse(scheduledTimes.hasDeparted(0), "Scheduled timetable should not have departed");
+    assertEquals(secondsInDay(10, 30), scheduledTimes.getArrivalTime(1));
+    assertEquals(secondsInDay(10, 30), scheduledTimes.getDepartureTime(1));
+    assertEquals(0, scheduledTimes.getArrivalDelay(1));
+    assertEquals(0, scheduledTimes.getDepartureDelay(1));
+    assertEquals(secondsInDay(10, 40), scheduledTimes.getArrivalTime(2));
+    assertEquals(secondsInDay(10, 40), scheduledTimes.getDepartureTime(2));
+    assertEquals(0, scheduledTimes.getArrivalDelay(2));
+
+    // Assert updated trip times
+    var times = tripUpdate.tripTimes();
+    assertEquals(trip, times.getTrip());
+    assertTrue(times.isAdded());
+    assertTrue(times.hasAnyUpdates());
+    assertEquals(secondsInDay(10, 19), times.getArrivalTime(0));
+    assertEquals(secondsInDay(10, 19), times.getDepartureTime(0));
+    assertEquals(-60, times.getDepartureDelay(0));
+    assertEquals(HEADSIGN, times.getHeadsign(0).toString());
+    assertTrue(times.hasArrived(0), "First stop should have arrived");
+    assertTrue(times.hasDeparted(0), "First stop should have departed");
+    assertEquals(secondsInDay(10, 29), times.getArrivalTime(1));
+    assertEquals(secondsInDay(10, 31), times.getDepartureTime(1));
+    assertEquals(-60, times.getArrivalDelay(1));
+    assertEquals(60, times.getDepartureDelay(1));
+    assertFalse(times.hasArrived(1), "Second stop should not have arrived");
+    assertFalse(times.hasDeparted(1), "Second stop should not have departed");
+    assertEquals(secondsInDay(10, 41), times.getArrivalTime(2));
+    assertEquals(secondsInDay(10, 41), times.getDepartureTime(2));
+    assertEquals(60, times.getArrivalDelay(2));
+    assertFalse(times.hasArrived(1), "Third stop should not have arrived");
+    assertFalse(times.hasDeparted(1), "Third stop should not have departed");
+  }
+
+  @Test
+  void testAddedTripOnAddedRoute() {
+    var firstAddedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      getCalls(10),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    ).build();
+
+    assertTrue(firstAddedTrip.routeCreation());
+
+    var firstTrip = firstAddedTrip.tripTimes().getTrip();
+
+    var tripId2 = id("TRIP_ID_2");
+    var datedServiceJourneyId2 = id("DATED_SERVICE_JOURNEY_ID_2");
+
+    var secondAddedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      tripId2,
+      datedServiceJourneyId2,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      getCalls(11),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    ).build();
+
+    // Assert trip
+    Trip secondTrip = secondAddedTrip.tripTimes().getTrip();
+    assertEquals(tripId2, secondTrip.getId(), "Trip should be mapped");
+    assertNotEquals(firstTrip, secondTrip);
+
+    // Assert trip times
+    var times = secondAddedTrip.tripTimes();
+    assertEquals(secondTrip, times.getTrip());
+    assertTrue(times.isAdded());
+    assertEquals(secondsInDay(11, 19), times.getArrivalTime(0));
+    assertEquals(secondsInDay(11, 19), times.getDepartureTime(0));
+    assertEquals(secondsInDay(11, 29), times.getArrivalTime(1));
+    assertEquals(secondsInDay(11, 31), times.getDepartureTime(1));
+    assertEquals(secondsInDay(11, 41), times.getArrivalTime(2));
+    assertEquals(secondsInDay(11, 41), times.getDepartureTime(2));
+  }
+
+  @Test
+  void testAddedTripOnExistingRoute() {
+    var addedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      REPLACED_ROUTE.getId().getId(),
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      getCalls(10),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    ).build();
+
+    // Assert trip
+    Trip trip = addedTrip.tripTimes().getTrip();
+    assertEquals(TRIP_ID, trip.getId(), "Trip should be mapped");
+    assertSame(REPLACED_ROUTE, trip.getRoute());
+
+    // Assert route
+    assertFalse(addedTrip.routeCreation(), "The existing route should be reused");
+  }
+
+  @Test
+  void testAddedTripWithoutReplacedRoute() {
+    var addedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      null,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      null,
+      getCalls(10),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    ).build();
+
+    // Assert trip
+    Trip trip = addedTrip.tripTimes().getTrip();
+    assertEquals(TRIP_ID, trip.getId(), "Trip should be mapped");
+
+    // Assert route
+    assertTrue(addedTrip.routeCreation(), "A new route should be created");
+    Route route = trip.getRoute();
+    assertEquals(LINE_REF, route.getId().getId(), "route should be mapped");
+    assertEquals(AGENCY, route.getAgency(), "Agency should be taken from replaced route");
+    assertEquals(SHORT_NAME, route.getShortName());
+    assertEquals(TRANSIT_MODE, route.getMode(), "transitMode should be mapped");
+    assertEquals(
+      SubMode.UNKNOWN,
+      route.getNetexSubmode(),
+      "submode should be unknown, when ro replacing route is found"
+    );
+    assertNotEquals(REPLACED_ROUTE, route, "Should not re-use replaced route");
+  }
+
+  @Test
+  void testAddedTripFailOnMissingServiceId() {
+    var addedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      null,
+      TRANSIT_MODE,
+      SUB_MODE,
+      getCalls(0),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    );
+
+    assertFailure(
+      UpdateErrorType.NO_START_DATE,
+      addedTrip::build,
+      "Trip creation should fail without start date"
+    );
+  }
+
+  @Test
+  void testAddedTripFailOnNonIncreasingDwellTime() {
+    List<CallWrapper> calls = List.of(
+      TestCall.of()
+        .withStopPointRef(STOP_A.getId().getId())
+        .withAimedDepartureTime(zonedDateTime(10, 20))
+        .withExpectedDepartureTime(zonedDateTime(10, 20))
+        .build(),
+      TestCall.of()
+        .withStopPointRef(STOP_B.getId().getId())
+        .withAimedArrivalTime(zonedDateTime(10, 30))
+        .withExpectedArrivalTime(zonedDateTime(10, 31))
+        .withAimedDepartureTime(zonedDateTime(10, 30))
+        .withExpectedDepartureTime(zonedDateTime(10, 29))
+        .build(),
+      // Expected to arrive one minute prior to irrelevant aimed departure time
+      TestCall.of()
+        .withStopPointRef(STOP_C.getId().getId())
+        .withAimedArrivalTime(zonedDateTime(10, 40))
+        .withExpectedArrivalTime(zonedDateTime(10, 40))
+        .build()
+    );
+
+    var addedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      calls,
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    );
+
+    assertFailure(
+      UpdateErrorType.NEGATIVE_DWELL_TIME,
+      addedTrip::build,
+      "Trip creation should fail with invalid dwell time"
+    );
+  }
+
+  @Test
+  void testAddedTripFailOnTooFewCalls() {
+    List<CallWrapper> calls = List.of(
+      TestCall.of()
+        .withStopPointRef(STOP_A.getId().getId())
+        .withAimedDepartureTime(zonedDateTime(10, 20))
+        .withExpectedDepartureTime(zonedDateTime(10, 20))
+        .build()
+    );
+    var addedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      calls,
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    );
+    assertFailure(
+      UpdateErrorType.TOO_FEW_STOPS,
+      addedTrip::build,
+      "Trip creation should fail with too few calls"
+    );
+  }
+
+  @Test
+  void testAddedTripFailOnUnknownStop() {
+    List<CallWrapper> calls = List.of(
+      TestCall.of()
+        .withStopPointRef("UNKNOWN_STOP_REF")
+        .withAimedDepartureTime(zonedDateTime(10, 20))
+        .withExpectedDepartureTime(zonedDateTime(10, 20))
+        .build(),
+      TestCall.of()
+        .withStopPointRef(STOP_B.getId().getId())
+        .withAimedArrivalTime(zonedDateTime(10, 30))
+        .withExpectedArrivalTime(zonedDateTime(10, 31))
+        .withAimedDepartureTime(zonedDateTime(10, 30))
+        .withExpectedDepartureTime(zonedDateTime(10, 29))
+        .build()
+    );
+    var addedTrip = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      calls,
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    );
+
+    assertFailure(
+      UpdateErrorType.UNKNOWN_STOP,
+      addedTrip::build,
+      "Trip creation should fail with call referring to unknown stop"
+    );
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "air,AIRPLANE,AIRPLANE,",
+    "bus,BUS,RAIL,railReplacementBus",
+    "rail,RAIL,RAIL,replacementRailService",
+    "ferry,FERRY,RAIL,",
+  })
+  void testGetTransportMode(
+    String siriMode,
+    String internalMode,
+    String replacedRouteMode,
+    String subMode
+  ) {
+    // Arrange
+    var route = Route.of(id(LINE_REF))
+      .withShortName(SHORT_NAME)
+      .withAgency(AGENCY)
+      .withMode(TransitMode.valueOf(replacedRouteMode))
+      .build();
+    var modes = List.of(VehicleModesEnumeration.fromValue(siriMode));
+
+    // Act
+    TransitMode transitMode = SiriTransportModeMapper.mapTransitMainMode(modes);
+    String transitSubMode = AddedTripBuilder.resolveTransitSubMode(transitMode, route);
+
+    //Assert
+    var expectedMode = TransitMode.valueOf(internalMode);
+    assertEquals(expectedMode, transitMode, "Mode not mapped to correct internal mode");
+    assertEquals(subMode, transitSubMode, "Mode not mapped to correct sub mode");
+  }
+
+  @Test
+  void vehicleRefIsSetOnTripTimes() {
+    var tripUpdate = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      getCalls(10),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      "BUS-42"
+    ).build();
+
+    var realTimeTimes = assertInstanceOf(RealTimeTripTimes.class, tripUpdate.tripTimes());
+    assertTrue(realTimeTimes.getVehicleId().isPresent());
+    assertEquals(id("BUS-42"), realTimeTimes.getVehicleId().get());
+  }
+
+  @Test
+  void vehicleRefIsNullWhenAbsent() {
+    var tripUpdate = new AddedTripBuilder(
+      transitService,
+      timetableRepository,
+      DEDUPLICATOR,
+      ENTITY_RESOLVER,
+      AbstractTransitEntity::getId,
+      TRIP_ID,
+      DATED_SERVICE_JOURNEY_ID,
+      OPERATOR,
+      LINE_REF,
+      REPLACED_ROUTE,
+      SERVICE_DATE,
+      TRANSIT_MODE,
+      SUB_MODE,
+      getCalls(10),
+      false,
+      null,
+      false,
+      SHORT_NAME,
+      HEADSIGN,
+      List.of(),
+      "DATASOURCE",
+      null
+    ).build();
+
+    var realTimeTimes = assertInstanceOf(RealTimeTripTimes.class, tripUpdate.tripTimes());
+    assertTrue(realTimeTimes.getVehicleId().isEmpty());
+  }
+
+  private static List<CallWrapper> getCalls(int hour) {
+    return List.of(
+      // Departed one minute early, prior to irrelevant aimed arrival time
+      TestCall.of()
+        .withStopPointRef(STOP_A.getId().getId())
+        .withAimedDepartureTime(zonedDateTime(hour, 20))
+        .withExpectedDepartureTime(zonedDateTime(hour, 20))
+        .withActualDepartureTime(zonedDateTime(hour, 19))
+        .withIsRecorded(true)
+        .build(),
+      TestCall.of()
+        .withStopPointRef(STOP_B.getId().getId())
+        .withAimedArrivalTime(zonedDateTime(hour, 30))
+        .withExpectedArrivalTime(zonedDateTime(hour, 29))
+        .withAimedDepartureTime(zonedDateTime(hour, 30))
+        .withExpectedDepartureTime(zonedDateTime(hour, 31))
+        .build(),
+      // Expected to arrive one minute prior to irrelevant aimed departure time
+      TestCall.of()
+        .withStopPointRef(STOP_C.getId().getId())
+        .withAimedArrivalTime(zonedDateTime(hour, 40))
+        .withExpectedArrivalTime(zonedDateTime(hour, 41))
+        .build()
+    );
+  }
+
+  private static ZonedDateTime zonedDateTime(int hour, int minute) {
+    return ZonedDateTime.of(SERVICE_DATE, LocalTime.of(hour, minute), TIME_ZONE);
+  }
+
+  private int secondsInDay(int hour, int minute) {
+    return (hour * 60 + minute) * 60;
+  }
+}

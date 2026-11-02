@@ -1,0 +1,110 @@
+package org.opentripplanner.gtfs.mapping;
+
+import java.util.Collection;
+import java.util.List;
+import java.util.Objects;
+import java.util.OptionalInt;
+import javax.annotation.Nullable;
+import org.onebusaway.gtfs.model.AgencyAndId;
+import org.onebusaway.gtfs.model.Area;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.ext.fares.model.FareDistance;
+import org.opentripplanner.ext.fares.model.FareLegRule;
+import org.opentripplanner.ext.fares.model.Timeframe;
+import org.opentripplanner.graph_builder.issue.api.DataImportIssueStore;
+
+class FareLegRuleMapper {
+
+  private final IdFactory idFactory;
+  private final FareProductMapper fareProductMapper;
+  private final TimeframeMapper timeframeMapper;
+  private final DataImportIssueStore issueStore;
+
+  public FareLegRuleMapper(
+    IdFactory idFactory,
+    FareProductMapper fareProductMapper,
+    TimeframeMapper timeframeMapper,
+    DataImportIssueStore issueStore
+  ) {
+    this.idFactory = idFactory;
+    this.fareProductMapper = fareProductMapper;
+    this.timeframeMapper = timeframeMapper;
+    this.issueStore = issueStore;
+  }
+
+  public Collection<FareLegRule> map(
+    Collection<org.onebusaway.gtfs.model.FareLegRule> allFareLegRules
+  ) {
+    return allFareLegRules.stream().map(this::map).filter(Objects::nonNull).toList();
+  }
+
+  @Nullable
+  private FareLegRule map(org.onebusaway.gtfs.model.FareLegRule r) {
+    var fareProductId = idFactory.createId(r.getFareProductId(), "fare leg rule's fare product id");
+    var productsForRule = fareProductMapper.findFareProducts(fareProductId);
+
+    if (!productsForRule.isEmpty()) {
+      FareDistance fareDistance = createFareDistance(r);
+      var ruleId = idFactory.createId(r.getId(), "fare leg rule");
+      var builder = FareLegRule.of(ruleId, productsForRule)
+        .withLegGroupId(idFactory.createNullableId(r.getLegGroupId()))
+        .withNetworkId(idFactory.createNullableId(r.getNetworkId()))
+        .withFromAreaId(areaId(r.getFromArea()))
+        .withToAreaId(areaId(r.getToArea()))
+        .withFareDistance(fareDistance)
+        .withFromTimeframes(mapTimeframe(r.getFromTimeframeGroupId()))
+        .withToTimeframes(mapTimeframe(r.getToTimeframeGroupId()));
+      r.getRulePriorityOption().ifPresent(builder::withPriority);
+      return builder.build();
+    } else {
+      issueStore.add(
+        "UnknownFareProductId",
+        "Fare leg rule %s refers to unknown fare product %s",
+        r.getId(),
+        fareProductId
+      );
+      return null;
+    }
+  }
+
+  private FeedScopedId areaId(@Nullable Area area) {
+    if (area == null) {
+      return null;
+    } else {
+      return idFactory.createId(area.getAreaId(), "area");
+    }
+  }
+
+  private static FareDistance createFareDistance(
+    org.onebusaway.gtfs.model.FareLegRule fareLegRule
+  ) {
+    final Integer distanceType = fareLegRule.getDistanceType();
+    if (distanceType == null) {
+      return null;
+    }
+    return switch (distanceType) {
+      case 0 -> new FareDistance.Stops(
+        optionalInt(fareLegRule.getMinDistance()).orElse(0),
+        optionalInt(fareLegRule.getMaxDistance()).orElse(Integer.MAX_VALUE)
+      );
+      case 1 -> throw new IllegalArgumentException("Distance type 1 is not supported");
+      default -> null;
+    };
+  }
+
+  private Collection<Timeframe> mapTimeframe(@Nullable AgencyAndId id) {
+    if (id == null) {
+      return List.of();
+    }
+    var groupId = idFactory.createId(id, "fare leg rule's timeframe group id");
+    return timeframeMapper.findTimeframes(groupId);
+  }
+
+  private static OptionalInt optionalInt(Double value) {
+    if (value == null) {
+      return OptionalInt.empty();
+    } else {
+      return OptionalInt.of(value.intValue());
+    }
+  }
+}

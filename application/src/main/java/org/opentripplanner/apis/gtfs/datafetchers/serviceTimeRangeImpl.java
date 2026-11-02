@@ -1,0 +1,24 @@
+package org.opentripplanner.apis.gtfs.datafetchers;
+
+import graphql.schema.DataFetcher;
+import graphql.schema.DataFetchingEnvironment;
+import org.opentripplanner.apis.gtfs.GtfsGraphQLRequestContext;
+import org.opentripplanner.apis.gtfs.generated.GraphQLDataFetchers;
+import org.opentripplanner.transit.service.TransitService;
+
+public class serviceTimeRangeImpl implements GraphQLDataFetchers.GraphQLServiceTimeRange {
+
+  @Override
+  public DataFetcher<Long> end() {
+    return environment -> getTransitService(environment).getTransitServiceEnds().getEpochSecond();
+  }
+
+  @Override
+  public DataFetcher<Long> start() {
+    return environment -> getTransitService(environment).getTransitServiceStarts().getEpochSecond();
+  }
+
+  private TransitService getTransitService(DataFetchingEnvironment environment) {
+    return environment.<GtfsGraphQLRequestContext>getContext().transitService();
+  }
+}

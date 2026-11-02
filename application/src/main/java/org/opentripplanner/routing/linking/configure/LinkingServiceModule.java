@@ -1,0 +1,57 @@
+package org.opentripplanner.routing.linking.configure;
+
+import static org.opentripplanner.street.linking.VisibilityMode.COMPUTE_AREA_VISIBILITY_LINES;
+
+import dagger.Module;
+import dagger.Provides;
+import java.util.Optional;
+import org.opentripplanner.framework.application.OTPFeature;
+import org.opentripplanner.routing.linking.LinkingContextFactory;
+import org.opentripplanner.routing.linking.internal.VertexCreationService;
+import org.opentripplanner.service.vehiclerental.VehicleRentalService;
+import org.opentripplanner.street.graph.Graph;
+import org.opentripplanner.street.linking.VertexLinker;
+import org.opentripplanner.street.service.StreetLimitationParametersService;
+import org.opentripplanner.transit.configure.StaticTransitService;
+import org.opentripplanner.transit.service.TransitService;
+
+@Module
+public class LinkingServiceModule {
+
+  @Provides
+  static VertexLinker provideVertexLinker(
+    Graph graph,
+    VehicleRentalService vehicleRentalService,
+    StreetLimitationParametersService streetLimitationParametersService
+  ) {
+    return new VertexLinker(
+      graph,
+      vehicleRentalService,
+      COMPUTE_AREA_VISIBILITY_LINES,
+      streetLimitationParametersService.maxAreaNodes(),
+      OTPFeature.FlexRouting.isOn()
+    );
+  }
+
+  @Provides
+  static VertexCreationService provideVertexCreationService(VertexLinker vertexLinker) {
+    return new VertexCreationService(vertexLinker);
+  }
+
+  @Provides
+  static LinkingContextFactory provideLinkingContextFactory(
+    Graph graph,
+    @StaticTransitService TransitService transitService,
+    VertexCreationService vertexCreationService
+  ) {
+    return new LinkingContextFactory(
+      graph,
+      vertexCreationService,
+      transitService::findStopOrChildIds,
+      id -> {
+        var group = transitService.getStopLocationsGroup(id);
+        return Optional.ofNullable(group).map(locationsGroup -> locationsGroup.getCoordinate());
+      }
+    );
+  }
+}

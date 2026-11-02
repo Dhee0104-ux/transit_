@@ -1,0 +1,240 @@
+package org.opentripplanner.apis.transmodel.model.timetable;
+
+import graphql.Scalars;
+import graphql.schema.DataFetchingEnvironment;
+import graphql.schema.GraphQLArgument;
+import graphql.schema.GraphQLFieldDefinition;
+import graphql.schema.GraphQLList;
+import graphql.schema.GraphQLNonNull;
+import graphql.schema.GraphQLObjectType;
+import graphql.schema.GraphQLOutputType;
+import graphql.schema.GraphQLType;
+import graphql.schema.GraphQLTypeReference;
+import java.util.List;
+import java.util.Optional;
+import org.opentripplanner.api.model.transit.FeedScopedIdMapper;
+import org.opentripplanner.apis.support.InvalidInputException;
+import org.opentripplanner.apis.transmodel.model.EnumTypes;
+import org.opentripplanner.apis.transmodel.model.framework.TransmodelDirectives;
+import org.opentripplanner.apis.transmodel.model.framework.TransmodelScalars;
+import org.opentripplanner.apis.transmodel.support.GqlUtil;
+import org.opentripplanner.transit.model.network.TripPattern;
+import org.opentripplanner.transit.model.site.StopLocation;
+import org.opentripplanner.transit.model.timetable.TripOnServiceDate;
+import org.opentripplanner.transit.service.TransitService;
+
+/**
+ * A DatedServiceJourney GraphQL Type for use in endpoints fetching DatedServiceJourney data
+ */
+public class DatedServiceJourneyType {
+
+  private static final String NAME = "DatedServiceJourney";
+  public static final GraphQLTypeReference REF = new GraphQLTypeReference(NAME);
+
+  private final FeedScopedIdMapper idMapper;
+
+  public DatedServiceJourneyType(FeedScopedIdMapper idMapper) {
+    this.idMapper = idMapper;
+  }
+
+  public GraphQLObjectType create(
+    GraphQLOutputType serviceJourneyType,
+    GraphQLOutputType journeyPatternType,
+    GraphQLType estimatedCallType,
+    GraphQLType quayType,
+    GraphQLOutputType replacedByType,
+    GraphQLOutputType replacementForType,
+    GraphQLOutputType realTimeJourneyStateType
+  ) {
+    return GraphQLObjectType.newObject()
+      .name(NAME)
+      .description("A planned journey on a specific day")
+      .field(GqlUtil.newTransitIdField(idMapper))
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("operatingDay")
+          .description(
+            "The date this service runs. The date used is based on the service date as opposed to calendar date."
+          )
+          .type(TransmodelScalars.DATE_SCALAR)
+          .dataFetcher(environment ->
+            Optional.of(tripOnServiceDate(environment))
+              .map(TripOnServiceDate::getServiceDate)
+              .orElse(null)
+          )
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("serviceJourney")
+          .description("The service journey this Dated Service Journey is based on")
+          .type(new GraphQLNonNull(serviceJourneyType))
+          .dataFetcher(environment -> tripOnServiceDate(environment).getTrip())
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("tripAlteration")
+          .description(
+            "Alterations specified on the Trip in the planned data. Note: realtime alterations are not included"
+          )
+          .type(EnumTypes.SERVICE_ALTERATION)
+          .dataFetcher(environment -> tripOnServiceDate(environment).getTripAlteration())
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("extraJourney")
+          .description(
+            "Whether this is an extra journey, either from planned data or added in realtime"
+          )
+          .type(new GraphQLNonNull(Scalars.GraphQLBoolean))
+          .dataFetcher(environment -> tripOnServiceDate(environment).isExtraJourney())
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("replacementFor")
+          .description("List of the dated service journeys this dated service journeys replaces")
+          .deprecate("Use replacementForRelation")
+          .type(new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(REF))))
+          .dataFetcher(environment -> tripOnServiceDate(environment).getReplacementFor())
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("replacementForRelation")
+          .description(
+            "Dated service journeys this dated service journey replaces with full replacement information"
+          )
+          .type(new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(replacementForType))))
+          .dataFetcher(environment ->
+            GqlUtil.getTransitService(environment)
+              .getReplacementHelper()
+              .getReplacementFor(tripOnServiceDate(environment))
+          )
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("replacedByRelation")
+          .description("Dated service journeys this dated service journey is replaced by")
+          .type(new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(replacedByType))))
+          .dataFetcher(environment ->
+            GqlUtil.getTransitService(environment)
+              .getReplacementHelper()
+              .getReplacedBy(tripOnServiceDate(environment))
+          )
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("journeyPattern")
+          .description("JourneyPattern for the dated service journey.")
+          .type(journeyPatternType)
+          .dataFetcher(DatedServiceJourneyType::tripPattern)
+          .build()
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("quays")
+          .description("Quays visited by the dated service journey.")
+          .type(new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(quayType))))
+          .argument(
+            GraphQLArgument.newArgument()
+              .name("first")
+              .description("Only fetch the first n quays on the service journey")
+              .type(Scalars.GraphQLInt)
+              .build()
+          )
+          .argument(
+            GraphQLArgument.newArgument()
+              .name("last")
+              .description("Only fetch the last n quays on the service journey")
+              .type(Scalars.GraphQLInt)
+              .build()
+          )
+          .dataFetcher(environment -> {
+            Integer first = environment.getArgument("first");
+            Integer last = environment.getArgument("last");
+            TripPattern tripPattern = tripPattern(environment);
+
+            if (tripPattern == null) {
+              return List.of();
+            }
+
+            List<StopLocation> stops = tripPattern.getStops();
+
+            if (first != null && last != null) {
+              throw new InvalidInputException(
+                "Both first and last can't be defined simultaneously."
+              );
+            }
+
+            if ((first != null && first < 0) || (last != null && last < 0)) {
+              throw new InvalidInputException("first and last must be positive integers.");
+            }
+
+            if (first != null && first < stops.size()) {
+              return stops.subList(0, first);
+            } else if (last != null && last < stops.size()) {
+              return stops.subList(stops.size() - last, stops.size());
+            }
+            return stops;
+          })
+          .build()
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("estimatedCalls")
+          .type(new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(estimatedCallType))))
+          .withDirective(TransmodelDirectives.TIMING_DATA)
+          .description(
+            "Returns scheduled passingTimes for this dated service journey, " +
+              "updated with real-time-updates (if available). "
+          )
+          .dataFetcher(environment -> {
+            TripOnServiceDate tripOnServiceDate = tripOnServiceDate(environment);
+            return GqlUtil.getTransitService(environment)
+              .findTripTimesOnDate(tripOnServiceDate.getTrip(), tripOnServiceDate.getServiceDate())
+              .orElse(List.of());
+          })
+          .build()
+      )
+      .field(
+        GraphQLFieldDefinition.newFieldDefinition()
+          .name("realTimeJourneyState")
+          .description("The real-time state of this dated service journey.")
+          .type(realTimeJourneyStateType)
+          .dataFetcher(environment -> {
+            TripOnServiceDate tripOnServiceDate = tripOnServiceDate(environment);
+            TransitService transitService = GqlUtil.getTransitService(environment);
+            return transitService
+              .findTripTimes(tripOnServiceDate.getTrip(), tripOnServiceDate.getServiceDate())
+              .map(tripTimes -> {
+                if (tripTimes.isDeleted()) {
+                  throw new RuntimeException(
+                    "Trip has been deleted. this should not be exposed to the API and is probably a bug"
+                  );
+                }
+                return new TransmodelRealTimeTripStateModel(
+                  tripTimes.isAdded(),
+                  tripTimes.isCanceled(),
+                  tripTimes.isTimesModified(),
+                  tripTimes.isTripPatternModified(),
+                  tripTimes.hasAnyUpdates()
+                );
+              })
+              .orElse(null);
+          })
+          .build()
+      )
+      .build();
+  }
+
+  private static TripPattern tripPattern(DataFetchingEnvironment env) {
+    TransitService transitService = GqlUtil.getTransitService(env);
+    TripOnServiceDate tripOnServiceDate = tripOnServiceDate(env);
+    return transitService.findPattern(
+      tripOnServiceDate.getTrip(),
+      tripOnServiceDate.getServiceDate()
+    );
+  }
+
+  private static TripOnServiceDate tripOnServiceDate(DataFetchingEnvironment environment) {
+    return environment.getSource();
+  }
+}

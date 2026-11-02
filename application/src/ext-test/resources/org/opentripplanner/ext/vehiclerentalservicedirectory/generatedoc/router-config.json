@@ -1,0 +1,8 @@
+{
+  "vehicleRentalServiceDirectory": {
+    "url": "https://example.com/gbfs/v3/manifest.json",
+    "headers": {
+      "ET-Client-Name": "otp"
+    }
+  }
+}

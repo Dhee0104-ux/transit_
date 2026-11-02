@@ -1,0 +1,35 @@
+package org.opentripplanner.osm.tagmapping;
+
+/**
+ * This is the list of {@link OsmTagMapper} sources. The enum provide a mapping between the enum
+ * name and the actual implementation.
+ */
+public enum OsmTagMapperSource {
+  DEFAULT,
+  NORWAY,
+  UK,
+  FINLAND,
+  GERMANY,
+  HAMBURG,
+  ATLANTA,
+  HOUSTON,
+  PORTLAND,
+  TWIN_CITIES,
+  CONSTANT_SPEED_FINLAND;
+
+  public OsmTagMapper getInstance() {
+    return switch (this) {
+      case DEFAULT -> new OsmTagMapper();
+      case NORWAY -> new NorwayMapper();
+      case UK -> new UKMapper();
+      case FINLAND -> new FinlandMapper();
+      case GERMANY -> new GermanyMapper();
+      case HAMBURG -> new HamburgMapper();
+      case ATLANTA -> new AtlantaMapper();
+      case HOUSTON -> new HoustonMapper();
+      case PORTLAND -> new PortlandMapper();
+      case TWIN_CITIES -> new TwinCitiesMapper();
+      case CONSTANT_SPEED_FINLAND -> new ConstantSpeedMapper();
+    };
+  }
+}

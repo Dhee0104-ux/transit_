@@ -1,0 +1,206 @@
+package org.opentripplanner.updater.trip.siri;
+
+import static org.opentripplanner.updater.spi.UpdateErrorType.INVALID_STOP_SEQUENCE;
+import static org.opentripplanner.updater.spi.UpdateErrorType.NO_START_DATE;
+import static org.opentripplanner.updater.spi.UpdateErrorType.STOP_MISMATCH;
+import static org.opentripplanner.updater.spi.UpdateErrorType.UNKNOWN_STOP;
+
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.Function;
+import javax.annotation.Nullable;
+import org.opentripplanner.core.framework.deduplicator.DeduplicatorService;
+import org.opentripplanner.core.model.id.FeedScopedId;
+import org.opentripplanner.model.StopTime;
+import org.opentripplanner.transit.model.framework.DataValidationException;
+import org.opentripplanner.transit.model.network.StopPattern;
+import org.opentripplanner.transit.model.network.TripPattern;
+import org.opentripplanner.transit.model.site.StopLocation;
+import org.opentripplanner.transit.model.timetable.OccupancyStatus;
+import org.opentripplanner.transit.model.timetable.RealTimeTripTimesBuilder;
+import org.opentripplanner.transit.model.timetable.Trip;
+import org.opentripplanner.transit.model.timetable.TripTimesFactory;
+import org.opentripplanner.transit.repository.TimetableRepository;
+import org.opentripplanner.transit.service.TransitService;
+import org.opentripplanner.updater.spi.DataValidationExceptionMapper;
+import org.opentripplanner.updater.spi.UpdateException;
+import org.opentripplanner.utils.time.ServiceDateUtils;
+
+class ExtraCallTripBuilder {
+
+  private final TransitService transitService;
+  private final TimetableRepository buffer;
+  private final ZoneId timeZone;
+  private final Function<Trip, FeedScopedId> generateTripPatternId;
+  private final Trip trip;
+  private final String dataSource;
+  private final LocalDate serviceDate;
+  private final List<CallWrapper> calls;
+  private final boolean isJourneyPredictionInaccurate;
+  private final OccupancyStatus occupancy;
+  private final boolean cancellation;
+  private final boolean added;
+  private final StopTimesMapper stopTimesMapper;
+  private final DeduplicatorService deduplicator;
+
+  @Nullable
+  private final String vehicleRef;
+
+  ExtraCallTripBuilder(
+    EstimatedVehicleJourneyWrapper journey,
+    TransitService transitService,
+    TimetableRepository buffer,
+    DeduplicatorService deduplicator,
+    EntityResolver entityResolver,
+    Function<Trip, FeedScopedId> generateTripPatternId,
+    Trip trip
+  ) {
+    this.buffer = buffer;
+    this.trip = Objects.requireNonNull(trip);
+
+    this.deduplicator = deduplicator;
+    // DataSource of added trip
+    dataSource = journey.dataSource().orElse(null);
+
+    serviceDate = entityResolver.resolveServiceDate(journey);
+
+    isJourneyPredictionInaccurate = journey.isPredictionInaccurate();
+    occupancy = journey.occupancy().orElse(null);
+    cancellation = journey.isCancellation();
+    added = journey.isExtraJourney();
+    vehicleRef = journey.vehicleRef().orElse(null);
+
+    this.calls = journey.calls();
+
+    this.transitService = transitService;
+    this.generateTripPatternId = generateTripPatternId;
+    timeZone = transitService.getTimeZone();
+
+    stopTimesMapper = new StopTimesMapper(entityResolver);
+  }
+
+  TripUpdate build() throws UpdateException {
+    TripPattern originalPattern = transitService.findPattern(trip);
+    long numExtraCalls = calls.stream().filter(CallWrapper::isExtraCall).count();
+    if (calls.size() - numExtraCalls != originalPattern.numberOfStops()) {
+      // A trip update with extra calls is expected to have the same number of non-extra calls as
+      // the number of stops in the original scheduled trip
+      throw UpdateException.of(trip.getId(), INVALID_STOP_SEQUENCE);
+    }
+
+    if (serviceDate == null) {
+      throw UpdateException.of(trip.getId(), NO_START_DATE);
+    }
+
+    FeedScopedId calServiceId = buffer.getOrCreateServiceIdForDate(serviceDate);
+    if (calServiceId == null) {
+      throw UpdateException.of(trip.getId(), NO_START_DATE);
+    }
+
+    ZonedDateTime startOfService = ServiceDateUtils.asStartOfService(serviceDate, timeZone);
+
+    // Create the "scheduled version" of the trip
+    // We do not reuse the trip times of the original scheduled trip
+    // since adding extra stops change the timings of later stops in the trip pattern.
+    var aimedStopTimes = new ArrayList<StopTime>();
+    int extraCallCounter = 0;
+    for (int stopSequence = 0; stopSequence < calls.size(); stopSequence++) {
+      CallWrapper call = calls.get(stopSequence);
+      StopTime stopTime = stopTimesMapper.createAimedStopTime(
+        trip,
+        startOfService,
+        stopSequence,
+        call,
+        stopSequence == 0,
+        stopSequence == calls.size() - 1
+      );
+
+      // Drop this update if the call refers to an unknown stop (not present in the site repository).
+      if (stopTime == null) {
+        throw UpdateException.of(trip.getId(), UNKNOWN_STOP);
+      }
+
+      // Drop this update if it replaces scheduled stops from the original pattern.
+      // Only changes within the same parent station are allowed.
+      if (call.isExtraCall()) {
+        extraCallCounter++;
+      } else {
+        StopLocation stopInOriginalPattern = originalPattern.getStop(
+          stopSequence - extraCallCounter
+        );
+        StopLocation stopInNewPattern = stopTime.getStop();
+        if (
+          !stopInNewPattern.equals(stopInOriginalPattern) &&
+          !stopInNewPattern.isPartOfSameStationAs(stopInOriginalPattern)
+        ) {
+          throw UpdateException.of(trip.getId(), STOP_MISMATCH);
+        }
+      }
+
+      aimedStopTimes.add(stopTime);
+    }
+
+    // TODO: We always create a new TripPattern to be able to modify its scheduled timetable
+    StopPattern stopPattern = new StopPattern(aimedStopTimes);
+
+    var tripTimes = TripTimesFactory.tripTimes(trip, aimedStopTimes, deduplicator).withServiceCode(
+      transitService.getTripCalendars().getServiceCode(trip.getServiceId())
+    );
+    // validate the scheduled trip times
+    // they are in general superseded by real-time trip times
+    // but in case of trip cancellation, OTP will fall back to scheduled trip times
+    // therefore they must be valid
+    tripTimes.validateNonIncreasingTimes();
+    TripPattern pattern = TripPattern.of(generateTripPatternId.apply(trip))
+      .withRoute(trip.getRoute())
+      .withMode(trip.getMode())
+      .withNetexSubmode(trip.getNetexSubMode())
+      .withStopPattern(stopPattern)
+      .withRealTimeStopPatternModified()
+      .withScheduledTimeTableBuilder(builder -> builder.addTripTimes(tripTimes))
+      .build();
+
+    RealTimeTripTimesBuilder builder = tripTimes.createRealTimeFromScheduledTimes();
+
+    // Loop through calls again and apply updates
+    for (int stopSequence = 0; stopSequence < calls.size(); stopSequence++) {
+      TimetableHelper.applyUpdates(
+        startOfService,
+        builder,
+        stopSequence,
+        stopSequence == calls.size() - 1,
+        isJourneyPredictionInaccurate,
+        calls.get(stopSequence),
+        occupancy
+      );
+    }
+
+    builder.withVehicleId(FeedScopedId.ofNullable(trip.getId().getFeedId(), vehicleRef));
+    if (cancellation || stopPattern.isAllStopsNonRoutable()) {
+      builder.withCanceled();
+    }
+    if (added) {
+      builder.withAdded();
+    }
+    builder.withModifiedTripPattern();
+    /* Validate */
+    try {
+      return new TripUpdate(
+        stopPattern,
+        builder.build(),
+        serviceDate,
+        null,
+        pattern,
+        false,
+        dataSource,
+        null
+      );
+    } catch (DataValidationException e) {
+      throw DataValidationExceptionMapper.map(e);
+    }
+  }
+}
