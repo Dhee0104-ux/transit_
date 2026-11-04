@@ -4,7 +4,6 @@ import {
   Location,
   StreetMode,
   TransportMode,
-  TransportModeSlack,
   TripQuery,
   TripQueryVariables,
   TripViaLocationInput,
@@ -130,8 +129,12 @@ async function resolveViaLocations(
  * Rapid spatial index fallback: resolves latitude/longitude to the nearest valid Quay ID
  * via quaysByBbox so disconnected street vertices never fail a journey.
  */
-async function findNearestQuayGeo(lat: number, lon: number): Promise<string | null> {
-  const delta = 0.015; // ~1.6 km bbox
+async function findNearestQuayGeo(
+  lat: number,
+  lon: number,
+  targetMode: 'metro' | 'bus' | 'all' = 'all',
+): Promise<string | null> {
+  const delta = 0.020; // ~2.2 km bbox
   try {
     const res = (await request(
       getApiUrl(),
@@ -155,8 +158,16 @@ async function findNearestQuayGeo(lat: number, lon: number): Promise<string | nu
       },
     )) as { quaysByBbox?: Array<{ id: string; latitude: number; longitude: number }> };
 
-    const quays = res?.quaysByBbox || [];
+    let quays = res?.quaysByBbox || [];
     if (quays.length === 0) return null;
+
+    if (targetMode === 'bus') {
+      const busQuays = quays.filter((q) => q.id.startsWith('2:'));
+      if (busQuays.length > 0) quays = busQuays;
+    } else if (targetMode === 'metro') {
+      const metroQuays = quays.filter((q) => q.id.startsWith('1:'));
+      if (metroQuays.length > 0) quays = metroQuays;
+    }
 
     quays.sort((a, b) => {
       const distA = Math.hypot(a.latitude - lat, a.longitude - lon);
@@ -383,6 +394,84 @@ async function ensureAccessAndEgressWalkingLegs(
   return updatedPatterns;
 }
 
+/**
+ * Executes a single OTP GraphQL routing query with fallback spatial quay snapping
+ */
+async function executeOtpRouting(
+  mergedVariables: TripQueryVariables,
+  targetMode: 'metro' | 'bus' | 'all' = 'all',
+  pageCursor?: string,
+): Promise<TripQuery> {
+  const baseVariables = pageCursor ? { ...mergedVariables, pageCursor } : mergedVariables;
+  const prunedVariables = createPrunedVariables(baseVariables);
+  const prunedQuery = createPrunedQuery(baseVariables);
+
+  let result: TripQuery;
+  try {
+    result = (await request(getApiUrl(), prunedQuery, prunedVariables)) as TripQuery;
+  } catch (stdErr) {
+    console.warn('Standard query failed:', stdErr);
+    result = { trip: { tripPatterns: [], routingErrors: [] } } as unknown as TripQuery;
+  }
+
+  // Intelligent geographic snap fallback if no routes found or street reachability error occurred
+  const tripPatterns = result?.trip?.tripPatterns || [];
+  const rawErrors =
+    (result as unknown as { trip?: { routingErrors?: Array<{ code?: string }> } })?.trip?.routingErrors || [];
+  const hasConnectivityError = rawErrors.some(
+    (err: { code?: string }) => err?.code === 'noStopsInRange' || err?.code === 'noTransitConnection',
+  );
+
+  if (
+    (tripPatterns.length === 0 || hasConnectivityError) &&
+    (mergedVariables.from?.coordinates || mergedVariables.to?.coordinates)
+  ) {
+    let fallbackFrom = mergedVariables.from;
+    let fallbackTo = mergedVariables.to;
+    let neededFallback = false;
+
+    if (mergedVariables.from?.coordinates) {
+      const nearestFrom = await findNearestQuayGeo(
+        mergedVariables.from.coordinates.latitude,
+        mergedVariables.from.coordinates.longitude,
+        targetMode,
+      );
+      if (nearestFrom) {
+        fallbackFrom = { place: nearestFrom };
+        neededFallback = true;
+      }
+    }
+
+    if (mergedVariables.to?.coordinates) {
+      const nearestTo = await findNearestQuayGeo(
+        mergedVariables.to.coordinates.latitude,
+        mergedVariables.to.coordinates.longitude,
+        targetMode,
+      );
+      if (nearestTo) {
+        fallbackTo = { place: nearestTo };
+        neededFallback = true;
+      }
+    }
+
+    if (neededFallback) {
+      const fallbackVars = { ...mergedVariables, from: fallbackFrom, to: fallbackTo };
+      const fallbackPrunedVars = createPrunedVariables(fallbackVars);
+      const fallbackPrunedQuery = createPrunedQuery(fallbackVars);
+      try {
+        const fallbackResult = (await request(getApiUrl(), fallbackPrunedQuery, fallbackPrunedVars)) as TripQuery;
+        if (fallbackResult?.trip?.tripPatterns?.length) {
+          result = fallbackResult;
+        }
+      } catch (fallbackErr) {
+        console.warn('Fallback routing error', fallbackErr);
+      }
+    }
+  }
+
+  return result;
+}
+
 type TripQueryHook = (
   variables?: TripQueryVariables,
 ) => [TripQuery | null, boolean, (pageCursor?: string) => Promise<void>, unknown];
@@ -411,57 +500,34 @@ export const useTripQuery: TripQueryHook = (variables) => {
           effectiveVia = await resolveViaLocations(variables.via);
         }
 
-        // Check user preferences
+        // Check user transit preferences
+        const targetRouteCount = variables.numTripPatterns ?? 5;
+        const effectiveSearchWindow = variables.searchWindow ?? 90;
+
         const prefModes = variables.modes?.transportModes?.map((m) => m?.transportMode);
         const hasMetro = prefModes ? prefModes.includes(TransportMode.Metro) : true;
         const hasBus = prefModes ? prefModes.includes(TransportMode.Bus) : true;
         const isMetroOnly = hasMetro && !hasBus;
         const isBusOnly = hasBus && !hasMetro;
-
-        const rawSlack = variables.boardSlackList;
-        const slackArray: (TransportModeSlack | null | undefined)[] = Array.isArray(rawSlack)
-          ? rawSlack
-          : rawSlack
-            ? [rawSlack]
-            : [];
-        const isPreferBus = slackArray.some(
-          (b) => b?.modes?.includes(TransportMode.Metro) && (b.slack ?? 0) > 0,
-        );
-        const isPreferMetro =
-          !isBusOnly &&
-          !isPreferBus &&
-          (isMetroOnly ||
-            Boolean(variables.relaxTransitGroupPriority?.constant && Number(variables.relaxTransitGroupPriority.constant) > 0));
-
-        const effectiveModes = variables.modes ?? {
-          accessMode: StreetMode.Foot,
-          directMode: StreetMode.Foot,
-          egressMode: StreetMode.Foot,
-          transportModes: [
-            { transportMode: TransportMode.Metro },
-            { transportMode: TransportMode.Bus },
-          ],
-        };
+        const isAllTransit = (hasMetro && hasBus) || (!isMetroOnly && !isBusOnly);
 
         const effectiveMaxAccessEgress = variables.maxAccessEgressDurationForMode ?? [
           { streetMode: StreetMode.Foot, duration: 'PT30M' },
         ];
-        const effectiveMaxDirect = variables.maxDirectDurationForMode ?? [
+        const effectiveMaxDirect = [
           { streetMode: StreetMode.Foot, duration: 'PT15M' },
         ];
 
-        // Ultra-fast balanced defaults for full citywide coverage (Metro + Bus) in milliseconds
-        const mergedVariables: TripQueryVariables = {
+        // Base query parameters
+        const baseMergedVariables: TripQueryVariables = {
           ...variables,
           dateTime: variables.dateTime ?? new Date().toISOString(),
-          modes: effectiveModes,
           walkSpeed: variables.walkSpeed ?? 1.33,
           maxAccessEgressDurationForMode: effectiveMaxAccessEgress,
           maxDirectDurationForMode: effectiveMaxDirect,
-          numTripPatterns: variables.numTripPatterns ?? 4,
-          searchWindow: variables.searchWindow ?? 30,
-          maximumTransfers: variables.maximumTransfers ?? 3,
-          maximumAdditionalTransfers: variables.maximumAdditionalTransfers ?? 1,
+          searchWindow: effectiveSearchWindow,
+          maximumTransfers: variables.maximumTransfers ?? 4,
+          maximumAdditionalTransfers: variables.maximumAdditionalTransfers ?? 2,
           walkReluctance: variables.walkReluctance ?? 1.25,
           transferPenalty: variables.transferPenalty ?? 60,
           ...(effectiveVia ? { via: effectiveVia } : {}),
@@ -469,8 +535,12 @@ export const useTripQuery: TripQueryHook = (variables) => {
 
         // Check instant cache
         const cacheKey = JSON.stringify({
-          v: mergedVariables,
+          v: baseMergedVariables,
+          count: targetRouteCount,
           cursor: pageCursor,
+          isAllTransit,
+          isMetroOnly,
+          isBusOnly,
         });
         const cached = tripResponseCache.get(cacheKey);
         if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
@@ -481,79 +551,89 @@ export const useTripQuery: TripQueryHook = (variables) => {
           return;
         }
 
-        let result: TripQuery;
+        let rawTripPatterns: TripPattern[] = [];
+        let baseResult: TripQuery | null = null;
 
-        // Standard query executed directly through OTP router engine
-        const baseVariables = pageCursor ? { ...mergedVariables, pageCursor } : mergedVariables;
-        const prunedVariables = createPrunedVariables(baseVariables);
-        const prunedQuery = createPrunedQuery(baseVariables);
-        try {
-          result = (await request(getApiUrl(), prunedQuery, prunedVariables)) as TripQuery;
-        } catch (stdErr) {
-          console.warn('Standard query failed:', stdErr);
-          result = { trip: { tripPatterns: [], routingErrors: [] } } as unknown as TripQuery;
+        if (isAllTransit) {
+          // In "All Transit" mode: Query BOTH multimodal (Metro + Bus) and bus-only
+          // to guarantee that routes with Metro AND routes without Metro (pure BMTC bus)
+          // are discovered and displayed together without Pareto-dominance pruning.
+          const multiModalVars: TripQueryVariables = {
+            ...baseMergedVariables,
+            modes: {
+              accessMode: StreetMode.Foot,
+              directMode: StreetMode.Foot,
+              egressMode: StreetMode.Foot,
+              transportModes: [
+                { transportMode: TransportMode.Metro },
+                { transportMode: TransportMode.Bus },
+              ],
+            },
+            numTripPatterns: Math.max(targetRouteCount * 2, 8),
+          };
+
+          const busOnlyVars: TripQueryVariables = {
+            ...baseMergedVariables,
+            modes: {
+              accessMode: StreetMode.Foot,
+              directMode: StreetMode.Foot,
+              egressMode: StreetMode.Foot,
+              transportModes: [{ transportMode: TransportMode.Bus }],
+            },
+            numTripPatterns: Math.max(targetRouteCount, 6),
+          };
+
+          const [multiRes, busRes] = await Promise.all([
+            executeOtpRouting(multiModalVars, 'all', pageCursor),
+            executeOtpRouting(busOnlyVars, 'bus', pageCursor),
+          ]);
+
+          baseResult = multiRes?.trip?.tripPatterns?.length ? multiRes : busRes;
+          rawTripPatterns = [
+            ...(multiRes?.trip?.tripPatterns || []),
+            ...(busRes?.trip?.tripPatterns || []),
+          ];
+        } else if (isMetroOnly) {
+          const metroVars: TripQueryVariables = {
+            ...baseMergedVariables,
+            modes: {
+              accessMode: StreetMode.Foot,
+              directMode: StreetMode.Foot,
+              egressMode: StreetMode.Foot,
+              transportModes: [{ transportMode: TransportMode.Metro }],
+            },
+            numTripPatterns: Math.max(targetRouteCount, 6),
+          };
+          baseResult = await executeOtpRouting(metroVars, 'metro', pageCursor);
+          rawTripPatterns = baseResult?.trip?.tripPatterns || [];
+        } else {
+          // Bus only
+          const busVars: TripQueryVariables = {
+            ...baseMergedVariables,
+            modes: {
+              accessMode: StreetMode.Foot,
+              directMode: StreetMode.Foot,
+              egressMode: StreetMode.Foot,
+              transportModes: [{ transportMode: TransportMode.Bus }],
+            },
+            numTripPatterns: Math.max(targetRouteCount, 6),
+          };
+          baseResult = await executeOtpRouting(busVars, 'bus', pageCursor);
+          rawTripPatterns = baseResult?.trip?.tripPatterns || [];
         }
 
-        // Intelligent geographic snap fallback if no routes found or street reachability error occurred
-        const tripPatterns = result?.trip?.tripPatterns || [];
-        const rawErrors = (result as unknown as { trip?: { routingErrors?: Array<{ code?: string }> } })?.trip?.routingErrors || [];
-        const hasConnectivityError = rawErrors.some(
-          (err: { code?: string }) => err?.code === 'noStopsInRange' || err?.code === 'noTransitConnection',
-        );
-
-        if (
-          (tripPatterns.length === 0 || hasConnectivityError) &&
-          (mergedVariables.from?.coordinates || mergedVariables.to?.coordinates)
-        ) {
-          let fallbackFrom = mergedVariables.from;
-          let fallbackTo = mergedVariables.to;
-          let neededFallback = false;
-
-          if (mergedVariables.from?.coordinates) {
-            const nearestFrom = await findNearestQuayGeo(
-              mergedVariables.from.coordinates.latitude,
-              mergedVariables.from.coordinates.longitude,
-            );
-            if (nearestFrom) {
-              fallbackFrom = { place: nearestFrom };
-              neededFallback = true;
-            }
-          }
-
-          if (mergedVariables.to?.coordinates) {
-            const nearestTo = await findNearestQuayGeo(
-              mergedVariables.to.coordinates.latitude,
-              mergedVariables.to.coordinates.longitude,
-            );
-            if (nearestTo) {
-              fallbackTo = { place: nearestTo };
-              neededFallback = true;
-            }
-          }
-
-          if (neededFallback) {
-            const fallbackVars = { ...mergedVariables, from: fallbackFrom, to: fallbackTo };
-            const fallbackPrunedVars = createPrunedVariables(fallbackVars);
-            const fallbackPrunedQuery = createPrunedQuery(fallbackVars);
-            try {
-              const fallbackResult = (await request(getApiUrl(), fallbackPrunedQuery, fallbackPrunedVars)) as TripQuery;
-              if (fallbackResult?.trip?.tripPatterns?.length) {
-                result = fallbackResult;
-              }
-            } catch (fallbackErr) {
-              console.warn('Fallback routing error', fallbackErr);
-            }
-          }
+        if (!baseResult) {
+          baseResult = { trip: { tripPatterns: [], routingErrors: [] } } as unknown as TripQuery;
         }
 
-        // Filter and sort routes based on transit preference
-        if (result?.trip?.tripPatterns?.length) {
+        // Process patterns if any found
+        if (rawTripPatterns.length > 0) {
           // Ensure inside access/egress walking legs are fully included with turn-by-turn road geometry
           const completePatterns = await ensureAccessAndEgressWalkingLegs(
-            result.trip.tripPatterns,
-            mergedVariables.from?.coordinates,
-            mergedVariables.to?.coordinates,
-            mergedVariables.walkSpeed ?? 1.33,
+            rawTripPatterns,
+            baseMergedVariables.from?.coordinates,
+            baseMergedVariables.to?.coordinates,
+            baseMergedVariables.walkSpeed ?? 1.33,
           );
 
           // Deduplicate patterns
@@ -572,55 +652,99 @@ export const useTripQuery: TripQueryHook = (variables) => {
 
           // Strict filtering for metro-only / bus-only
           if (isMetroOnly) {
-            const strictlyMetro = uniquePatterns.filter((p: TripPattern) =>
+            uniquePatterns = uniquePatterns.filter((p: TripPattern) =>
               p.legs.every((l: Leg) => {
                 const m = String(l.mode).toLowerCase();
-                return m === 'foot' || m === 'metro';
+                return m === 'foot' || m === 'metro' || m === 'subway';
               }),
             );
-            if (strictlyMetro.length > 0) uniquePatterns = strictlyMetro;
           } else if (isBusOnly) {
-            const strictlyBus = uniquePatterns.filter((p: TripPattern) =>
+            uniquePatterns = uniquePatterns.filter((p: TripPattern) =>
               p.legs.every((l: Leg) => {
                 const m = String(l.mode).toLowerCase();
-                return m === 'foot' || m === 'bus';
+                return m === 'foot' || m === 'bus' || m === 'coach';
               }),
             );
-            if (strictlyBus.length > 0) uniquePatterns = strictlyBus;
           }
 
-          // Preference-based sorting
-          uniquePatterns.sort((a: TripPattern, b: TripPattern) => {
-            const aBuses = a.legs.filter((l: Leg) => String(l.mode).toLowerCase() === 'bus').length;
-            const bBuses = b.legs.filter((l: Leg) => String(l.mode).toLowerCase() === 'bus').length;
-            const aMetro = a.legs.filter((l: Leg) => String(l.mode).toLowerCase() === 'metro').length;
-            const bMetro = b.legs.filter((l: Leg) => String(l.mode).toLowerCase() === 'metro').length;
+          let finalPatterns: TripPattern[] = [];
 
-            if (isPreferBus) {
-              // Routes with buses come first
-              const aHasBus = aBuses > 0 ? 1 : 0;
-              const bHasBus = bBuses > 0 ? 1 : 0;
-              if (aHasBus !== bHasBus) return bHasBus - aHasBus;
-              if (aMetro !== bMetro) return aMetro - bMetro; // fewer metros preferred
-            } else if (isPreferMetro || !isBusOnly) {
-              // Direct pure Metro (0 buses) comes FIRST!
-              const aPureMetro = aMetro > 0 && aBuses === 0 ? 1 : 0;
-              const bPureMetro = bMetro > 0 && bBuses === 0 ? 1 : 0;
-              if (aPureMetro !== bPureMetro) return bPureMetro - aPureMetro;
+          if (isAllTransit) {
+            // Separate routes with Metro vs routes without Metro (pure BMTC bus)
+            const withMetro = uniquePatterns.filter((p: TripPattern) =>
+              p.legs.some((l: Leg) => {
+                const m = String(l.mode).toLowerCase();
+                return m === 'metro' || m === 'subway';
+              }),
+            );
+            const withoutMetro = uniquePatterns.filter((p: TripPattern) =>
+              p.legs.every((l: Leg) => {
+                const m = String(l.mode).toLowerCase();
+                return m !== 'metro' && m !== 'subway';
+              }),
+            );
 
-              // Any Metro route over all-bus
-              const aHasMetro = aMetro > 0 ? 1 : 0;
-              const bHasMetro = bMetro > 0 ? 1 : 0;
-              if (aHasMetro !== bHasMetro) return bHasMetro - aHasMetro;
+            // Sort both sets by total travel duration
+            withMetro.sort((a, b) => (a.duration ?? 0) - (b.duration ?? 0));
+            withoutMetro.sort((a, b) => (a.duration ?? 0) - (b.duration ?? 0));
 
-              // Fewer buses preferred
-              if (aBuses !== bBuses) return aBuses - bBuses;
+            // Balanced inclusion: Ensure both with-metro and without-metro routes are displayed
+            if (withMetro.length > 0 && withoutMetro.length > 0) {
+              const combined: TripPattern[] = [];
+              const maxCount = targetRouteCount;
+              let wmIdx = 0;
+              let womIdx = 0;
+
+              // Lead with the fastest overall route
+              if ((withMetro[0]?.duration ?? 0) <= (withoutMetro[0]?.duration ?? 0)) {
+                combined.push(withMetro[wmIdx++]);
+                combined.push(withoutMetro[womIdx++]);
+              } else {
+                combined.push(withoutMetro[womIdx++]);
+                combined.push(withMetro[wmIdx++]);
+              }
+
+              // Fill the remaining slots with the fastest remaining routes
+              while (combined.length < maxCount && (wmIdx < withMetro.length || womIdx < withoutMetro.length)) {
+                const nextWm = withMetro[wmIdx];
+                const nextWom = withoutMetro[womIdx];
+
+                if (nextWm && nextWom) {
+                  if ((nextWm.duration ?? 0) <= (nextWom.duration ?? 0)) {
+                    combined.push(nextWm);
+                    wmIdx++;
+                  } else {
+                    combined.push(nextWom);
+                    womIdx++;
+                  }
+                } else if (nextWm) {
+                  combined.push(nextWm);
+                  wmIdx++;
+                } else if (nextWom) {
+                  combined.push(nextWom);
+                  womIdx++;
+                }
+              }
+
+              finalPatterns = combined;
+            } else if (withMetro.length > 0) {
+              finalPatterns = withMetro.slice(0, targetRouteCount);
+            } else {
+              finalPatterns = withoutMetro.slice(0, targetRouteCount);
             }
+          } else {
+            // Metro-only or Bus-only: sort by total duration and limit to target count
+            uniquePatterns.sort((a, b) => (a.duration ?? 0) - (b.duration ?? 0));
+            finalPatterns = uniquePatterns.slice(0, targetRouteCount);
+          }
 
-            return (a.duration ?? 0) - (b.duration ?? 0);
-          });
-
-          result.trip.tripPatterns = uniquePatterns;
+          baseResult = {
+            ...baseResult,
+            trip: {
+              ...baseResult.trip,
+              tripPatterns: finalPatterns,
+            },
+          };
         }
 
         if (requestId === activeRequestIdRef.current) {
@@ -629,9 +753,9 @@ export const useTripQuery: TripQueryHook = (variables) => {
             const firstKey = tripResponseCache.keys().next().value;
             if (firstKey) tripResponseCache.delete(firstKey);
           }
-          tripResponseCache.set(cacheKey, { data: result, timestamp: Date.now() });
+          tripResponseCache.set(cacheKey, { data: baseResult, timestamp: Date.now() });
 
-          setData(result);
+          setData(baseResult);
           setLoading(false);
         }
       } catch (e) {

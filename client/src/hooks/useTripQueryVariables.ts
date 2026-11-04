@@ -5,8 +5,8 @@ const DEFAULT_VARIABLES: TripQueryVariables = {
   from: {},
   to: {},
   dateTime: new Date().toISOString(),
-  numTripPatterns: 4,
-  searchWindow: 30,
+  numTripPatterns: 5,
+  searchWindow: 90,
   maxAccessEgressDurationForMode: [
     {
       streetMode: StreetMode.Foot,
@@ -43,8 +43,8 @@ const getInitialVariables = () => {
       return {
         ...DEFAULT_VARIABLES,
         ...parsed,
-        numTripPatterns: parsed.numTripPatterns ?? 4,
-        searchWindow: parsed.searchWindow ?? 30,
+        numTripPatterns: parsed.numTripPatterns ?? 5,
+        searchWindow: parsed.searchWindow ?? 90,
       };
     } catch {
       return DEFAULT_VARIABLES;

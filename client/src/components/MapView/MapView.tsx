@@ -6,6 +6,7 @@ import {
   MapMouseEvent,
   NavigationControl,
   MapRef,
+  ViewStateChangeEvent,
 } from 'react-map-gl/maplibre';
 import * as maplibregl from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
@@ -19,14 +20,17 @@ import { TripPattern, TripQuery, TripQueryVariables } from '../../gql/graphql.ts
 import { NavigationMarkers } from './NavigationMarkers.tsx';
 import { LegLines } from './LegLines.tsx';
 import { useMapDoubleClick } from './useMapDoubleClick.ts';
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { ContextMenuPopup } from './ContextMenuPopup.tsx';
 import { GeometryPropertyPopup } from './GeometryPropertyPopup.tsx';
-import RightMenu from './RightMenu.tsx';
-import { findSelectedDebugLayers } from '../../util/map.ts';
 import { FeatureSelectPopup } from './FeatureSelectPopup.tsx';
+import { useCity } from '../../context/CityContext.tsx';
+import { useTheme } from '../../context/ThemeContext.tsx';
+import { ThreeDBuildingsLayer } from './ThreeDBuildingsLayer.tsx';
 
-const styleUrl = import.meta.env.VITE_DEBUG_STYLE_URL;
+// 3D Digital Twin basemaps matching ASTraM 3D twins (Light and Dark)
+const DARK_STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+const LIGHT_STYLE_URL = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 
 type PopupData = { coordinates: LngLat; feature: MapGeoJSONFeature };
 type FeatureSelectData = { coordinates: LngLat; features: MapGeoJSONFeature[] };
@@ -48,17 +52,33 @@ export function MapView({
   const [showContextPopup, setShowContextPopup] = useState<LngLat | null>(null);
   const [showPropsPopup, setShowPropsPopup] = useState<PopupData | null>(null);
   const [showFeatureSelectPopup, setShowFeatureSelectPopup] = useState<FeatureSelectData | null>(null);
-  const [interactiveLayerIds, setInteractiveLayerIds] = useState<string[]>([]);
+  const [interactiveLayerIds] = useState<string[]>([]);
   const [cursor, setCursor] = useState<string>('auto');
   const onMouseEnter = useCallback(() => setCursor('pointer'), []);
   const onMouseLeave = useCallback(() => setCursor('auto'), []);
+
+  const { cityConfig } = useCity();
+  const { theme, is3D } = useTheme();
+  const mapRef = useRef<MapRef>(null);
+  const attributionAddedRef = useRef(false);
+
+  // Controlled camera view state for robust 3D pitch/bearing persistence
+  const [viewState, setViewState] = useState({
+    longitude: cityConfig.center[0],
+    latitude: cityConfig.center[1],
+    zoom: cityConfig.zoom,
+    pitch: is3D ? 58 : 0,
+    bearing: is3D ? -17 : 0,
+  });
+
+  const activeMapStyle = theme === 'dark' ? DARK_STYLE_URL : LIGHT_STYLE_URL;
+
   const showFeaturePropPopup = (
     e: MapMouseEvent & {
       features?: MapGeoJSONFeature[] | undefined;
     },
   ) => {
     if (e.features) {
-      // if there are more than one feature, show a selection popup
       if (e.features.length == 1) {
         const feature = e.features[0];
         setShowPropsPopup({ coordinates: e.lngLat, feature: feature });
@@ -68,43 +88,69 @@ export function MapView({
       }
     }
   };
-  const panToWorldEnvelopeIfRequired = (e: MapEvent) => {
-    const map = e.target;
-    // if we are really far zoomed out and show the entire world it means that we are not starting
-    // in a location selected from the URL hash.
-    // in such a case we pan to the area that is specified in the tile bounds, which is
-    // provided by the WorldEnvelopeService
-    if (map.getZoom() < 2) {
-      const source = map.getSource('stops') as maplibregl.VectorTileSource;
-      map.fitBounds(source.bounds, { animate: false });
-    }
-  };
 
   const onLoad = (e: MapEvent) => {
     const map = e.target;
-    map.addControl(new maplibregl.AttributionControl(), 'bottom-left');
+    if (!attributionAddedRef.current) {
+      attributionAddedRef.current = true;
+      map.addControl(new maplibregl.AttributionControl(), 'bottom-left');
+    }
+    // Set 3D directional light for realistic building roof and facade shading
+    try {
+      // @ts-ignore
+      map.setLight?.({
+        anchor: 'viewport',
+        color: theme === 'dark' ? '#C8D6EF' : '#FFFFFF',
+        intensity: theme === 'dark' ? 0.42 : 0.65,
+        position: [1.5, 90, 80],
+      });
+    } catch {
+      // Ignore if not supported by current GL renderer
+    }
   };
 
   function handleMapLoad(e: MapEvent) {
-    // 1) Call your existing function
-    panToWorldEnvelopeIfRequired(e);
-
-    const selected = findSelectedDebugLayers(e.target);
-    setInteractiveLayerIds(selected);
-
-    // 2) Add the native MapLibre attribution control
     onLoad(e);
   }
 
-  const mapRef = useRef<MapRef>(null); // Create a ref for MapRef
+  // Smoothly update 3D / 2D perspective when user clicks 3D toggle
+  useEffect(() => {
+    const targetPitch = is3D ? 58 : 0;
+    const targetBearing = is3D ? -17 : 0;
+
+    setViewState((prev) => ({
+      ...prev,
+      pitch: targetPitch,
+      bearing: targetBearing,
+    }));
+
+    if (mapRef.current) {
+      mapRef.current.easeTo({
+        pitch: targetPitch,
+        bearing: targetBearing,
+        duration: 800,
+      });
+    }
+  }, [is3D]);
+
+  const handleMove = useCallback((evt: ViewStateChangeEvent) => {
+    setViewState(evt.viewState);
+  }, []);
+
   return (
-    <div className="map-container below-content">
+    <div className={`map-container below-content ${theme}-theme-container`}>
       <Map
         attributionControl={false}
         // @ts-ignore
         mapLib={maplibregl}
         // @ts-ignore
-        mapStyle={styleUrl}
+        mapStyle={activeMapStyle}
+        {...viewState}
+        onMove={handleMove}
+        maxPitch={85}
+        touchPitch={true}
+        dragRotate={true}
+        pitchWithRotate={true}
         onDblClick={onMapDoubleClick}
         onContextMenu={(e) => {
           setShowContextPopup(e.lngLat);
@@ -114,15 +160,12 @@ export function MapView({
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
         onClick={showFeaturePropPopup}
-        // put lat/long in URL and pan to it on page reload
         hash={true}
-        // disable pitching and rotating the map
-        touchPitch={false}
-        dragRotate={false}
         onLoad={handleMapLoad}
         ref={mapRef}
       >
-        <NavigationControl position="top-left" />
+        <NavigationControl position="top-left" visualizePitch={true} />
+
         <NavigationMarkers
           setCursor={setCursor}
           tripQueryVariables={tripQueryVariables}
@@ -130,8 +173,10 @@ export function MapView({
           loading={loading}
         />
 
-        {/* eslint-disable-next-line react-hooks/refs -- RightMenu needs the map instance; re-renders from map state keep it current */}
-        <RightMenu position="top-right" setInteractiveLayerIds={setInteractiveLayerIds} mapRef={mapRef?.current} />
+        {/* 3D Buildings Extrusion Layer (Vector tiles & procedural skyblocks) */}
+        <ThreeDBuildingsLayer />
+
+        {/* Transit Route Polylines */}
         {tripQueryResult?.trip.tripPatterns.length &&
           selectedTripPatternIndexes.map((index) => {
             const tripPattern = tripQueryResult.trip.tripPatterns[index];
@@ -139,6 +184,7 @@ export function MapView({
               <LegLines key={`trippattern-${index}`} patternIndex={index} tripPattern={tripPattern as TripPattern} />
             ) : null;
           })}
+
         {showContextPopup && (
           <ContextMenuPopup
             tripQueryVariables={tripQueryVariables}

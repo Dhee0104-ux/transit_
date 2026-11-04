@@ -1,23 +1,23 @@
 {
   "server": {
-    "apiProcessingTimeout": "PT10S"
+    "apiProcessingTimeout": "PT15S"
   },
   "routingDefaults": {
-    "numItineraries": 5,
-    "searchWindow": "PT45M",
+    "numItineraries": 10,
+    "searchWindow": "PT120M",
     "transferSlack": "PT1M",
-    "transferPenalty": 120,
-    "nonpreferredTransferPenalty": 240,
+    "transferPenalty": 60,
+    "nonpreferredTransferPenalty": 120,
     "maxJourneyDuration": "PT3H",
     "maxDirectStreetDuration": "PT15M",
     "streetRoutingTimeout": "PT1S",
     "accessEgress": {
       "maxDuration": "PT120M",
-      "maxStopCount": 30
+      "maxStopCount": 40
     },
     "transitReluctanceForMode": {
-      "SUBWAY": 0.6,
-      "BUS": 1.35
+      "SUBWAY": 1.0,
+      "BUS": 1.0
     },
     "transferOptimization": {
       "optimizeTransferWaitTime": true,
@@ -26,34 +26,27 @@
       "extraStopBoardAlightCostsFactor": 2.0
     },
     "itineraryFilters": {
-      "groupSimilarityKeepOne": 0.70,
-      "groupSimilarityKeepThree": 0.50,
-      "groupedOtherThanSameLegsMaxCostMultiplier": 1.35,
+      "groupSimilarityKeepOne": 0.85,
+      "groupSimilarityKeepThree": 0.65,
+      "groupedOtherThanSameLegsMaxCostMultiplier": 2.0,
       "transitGeneralizedCostLimit": {
-        "costLimitFunction": "420 + 1.25x",
-        "intervalRelaxFactor": 0.4
+        "costLimitFunction": "900 + 2.0x",
+        "intervalRelaxFactor": 0.5
       }
-    },
-    "relaxTransitGroupPriority": "1800s + 1.5 t",
-    "transitGroupPriority": {
-      "global": [
-        { "modes": ["SUBWAY"] },
-        { "modes": ["BUS"] }
-      ]
     }
   },
   "transit": {
     "searchThreadPoolSize": 8,
-    "maxNumberOfTransfers": 2,
+    "maxNumberOfTransfers": 4,
     "iterationDepartureStepInSeconds": 180,
     "scheduledTripBinarySearchThreshold": 20,
-    "earlyTransferPruning": true,
+    "earlyTransferPruning": false,
     "transferCacheMaxSize": 8000,
-    "maxSearchWindow": "PT2H",
+    "maxSearchWindow": "PT4H",
     "dynamicSearchWindow": {
-      "minWindow": "PT15M",
-      "maxWindow": "PT30M",
-      "stepMinutes": 10
+      "minWindow": "PT30M",
+      "maxWindow": "PT120M",
+      "stepMinutes": 15
     }
   },
   "timetableUpdates": {

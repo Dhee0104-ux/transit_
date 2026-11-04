@@ -25,8 +25,15 @@ const getColorForMode = function (mode: Mode) {
  * Extract a line color from a leg. If there isn't one given by its line, this method returns a fallback color.
  */
 export const getColorForLeg = function (leg: Leg) {
-  if (leg.line?.presentation?.colour) {
-    return `#${leg.line.presentation.colour}`;
+  const modeStr = String(leg.mode).toLowerCase();
+  // All bus routes for both cities must be in red color
+  if (modeStr === 'bus' || modeStr === 'coach' || leg.mode === Mode.Bus || leg.mode === Mode.Coach) {
+    return '#DC2626';
+  }
+
+  const c = leg.line?.presentation?.colour;
+  if (c) {
+    return c.startsWith('#') ? c : `#${c}`;
   } else {
     return getColorForMode(leg.mode);
   }

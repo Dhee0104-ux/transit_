@@ -1,32 +1,26 @@
-import { MapView } from '../components/MapView/MapView.tsx';
-import { ItineraryListContainer } from '../components/ItineraryList/ItineraryListContainer.tsx';
-import { ItineraryCompareDialog } from '../components/ItineraryList/ItineraryCompareDialog.tsx';
 import { useState } from 'react';
+import { CityProvider } from '../context/CityContext.tsx';
+import { ThemeProvider } from '../context/ThemeContext.tsx';
+import { TransitSearchCard } from '../components/Search/TransitSearchCard.tsx';
+import { ModernItineraryList } from '../components/Itinerary/ModernItineraryList.tsx';
+import { DigitalTwinTopBar } from '../components/Header/DigitalTwinTopBar.tsx';
+import { MapView } from '../components/MapView/MapView.tsx';
 import { useTripQuery } from '../hooks/useTripQuery.ts';
-import { useServerInfo } from '../hooks/useServerInfo.ts';
 import { useTripQueryVariables } from '../hooks/useTripQueryVariables.ts';
+import { useServerInfo } from '../hooks/useServerInfo.ts';
 import { TimeZoneContext } from '../hooks/TimeZoneContext.ts';
-import { LogoSection } from '../components/SearchBar/LogoSection.tsx';
-import { InputFieldsSection } from '../components/SearchBar/InputFieldsSection.tsx';
-import TripQueryArguments from '../components/SearchInput/TripQueryArguments.tsx';
-import Sidebar from '../components/SearchInput/Sidebar.tsx';
-import ViewArgumentsRaw from '../components/SearchInput/ViewArgumentsRaw.tsx';
-import { TripSchemaProvider } from '../components/SearchInput/TripSchemaProvider.tsx';
-import { getApiUrl } from '../util/getApiUrl.ts';
+import { ItineraryCompareDialog } from '../components/ItineraryList/ItineraryCompareDialog.tsx';
 
-export function App() {
+function MainLayout() {
   const serverInfo = useServerInfo();
   const { tripQueryVariables, setTripQueryVariables } = useTripQueryVariables();
-  const [comparisonSelectedIndexes, setComparisonSelectedIndexes] = useState<number[]>([]);
+  const [comparisonSelectedIndexes] = useState<number[]>([]);
   const [showCompareDialog, setShowCompareDialog] = useState<boolean>(false);
   const [tripQueryResult, loading, callback] = useTripQuery(tripQueryVariables);
   const [selectedTripPatternIndexes, setSelectedTripPatternIndexes] = useState<number[]>([0]);
-  const [expandedArguments, setExpandedArguments] = useState<Record<string, boolean>>({});
   const timeZone = serverInfo?.internalTransitModelTimeZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   // Reset the selection to the first trip pattern whenever a new result arrives.
-  // Adjusting state during render (rather than in an effect) avoids a redundant
-  // re-render and complies with react-hooks/set-state-in-effect.
   const [prevTripQueryResult, setPrevTripQueryResult] = useState(tripQueryResult);
   if (tripQueryResult !== prevTripQueryResult) {
     setPrevTripQueryResult(tripQueryResult);
@@ -36,48 +30,27 @@ export function App() {
   }
 
   return (
-    <div className="app">
+    <div className="urban-transit-app">
       <TimeZoneContext.Provider value={timeZone}>
-        <div className="layout">
-          <div className="box logo-section">
-            <LogoSection serverInfo={serverInfo}></LogoSection>
-          </div>
-          <div className="box input-section">
-            <InputFieldsSection
-              onRoute={callback}
+        <div className="app-shell">
+          <aside className="sidebar-pane">
+            <TransitSearchCard
               tripQueryVariables={tripQueryVariables}
               setTripQueryVariables={setTripQueryVariables}
+              onRoute={callback}
               loading={loading}
-            ></InputFieldsSection>
-          </div>
-          <div className="box trip-section">
-            <Sidebar>
-              <ItineraryListContainer
+            />
+            <div className="itinerary-scroll-area">
+              <ModernItineraryList
                 tripQueryResult={tripQueryResult}
                 selectedTripPatternIndexes={selectedTripPatternIndexes}
                 setSelectedTripPatternIndexes={setSelectedTripPatternIndexes}
-                pageResults={callback}
                 loading={loading}
-                comparisonSelectedIndexes={comparisonSelectedIndexes}
-                setComparisonSelectedIndexes={setComparisonSelectedIndexes}
-                onCompare={() => setShowCompareDialog(true)}
-              ></ItineraryListContainer>
-              <TripSchemaProvider endpoint={getApiUrl()}>
-                <TripQueryArguments
-                  tripQueryVariables={tripQueryVariables}
-                  setTripQueryVariables={setTripQueryVariables}
-                  expandedArguments={expandedArguments}
-                  setExpandedArguments={setExpandedArguments}
-                ></TripQueryArguments>
-              </TripSchemaProvider>
-              <ViewArgumentsRaw
-                tripQueryVariables={tripQueryVariables}
-                setTripQueryVariables={setTripQueryVariables}
-                setExpandedArguments={setExpandedArguments}
-              ></ViewArgumentsRaw>
-            </Sidebar>
-          </div>
-          <div className="box map-section">
+              />
+            </div>
+          </aside>
+          <main className="map-pane">
+            <DigitalTwinTopBar />
             <MapView
               tripQueryResult={tripQueryResult}
               tripQueryVariables={tripQueryVariables}
@@ -85,7 +58,7 @@ export function App() {
               selectedTripPatternIndexes={selectedTripPatternIndexes}
               loading={loading}
             />
-          </div>
+          </main>
         </div>
         <ItineraryCompareDialog
           show={showCompareDialog}
@@ -95,5 +68,15 @@ export function App() {
         />
       </TimeZoneContext.Provider>
     </div>
+  );
+}
+
+export function App() {
+  return (
+    <ThemeProvider>
+      <CityProvider>
+        <MainLayout />
+      </CityProvider>
+    </ThemeProvider>
   );
 }
