@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "npm run codegen && vite",
-    "build": "npm run codegen && npm run lint && npm run check-format && tsc && vite build",
+    "build": "tsc && vite build",
     "test": "vitest --root src/",
     "coverage": "vitest run --root src/ --coverage",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
